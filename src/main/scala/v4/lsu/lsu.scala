@@ -1052,7 +1052,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       when (begin.valid) {
         assert(!difftest_attempts.get(index).andR, "DiffTest load attempt exhausted")
         difftest_attempts.get(index) := begin.bits.identity.attempt
-        ldq_uop(uop.ldq_idx).difftest.get.attempt := begin.bits.identity.attempt
+        ldq_uop(index).difftest.get.attempt := begin.bits.identity.attempt
       }
       when (dmem_req(w).valid && dmem_req(w).bits.uop.uses_ldq && !dmem_req(w).bits.is_hella) {
         dmem_req(w).bits.uop.difftest.get := begin.bits.identity
