@@ -989,10 +989,14 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     record.bits.byte_mask := new StoreGen(s3_req.uop.mem_size, s3_req.addr, 0.U, wordBytes).mask
     record.bits.atomic := s3_req.uop.is_amo
     record.bits.command := s3_req.uop.mem_cmd
-    // Include S3: the functional 'ordered' output only counts S1/S2.
+    // Include pipeline and TileLink channel transfers: the functional `ordered`
+    // output only counts S1/S2, while an incoming probe becomes visible in the
+    // prober state one cycle after its B-channel handshake.
     io.difftest.get.idle := mshrs.io.difftest_idle.get && !s0_valid.asUInt.orR &&
       !s1_valid.asUInt.orR && !s2_valid.asUInt.orR && !s3_valid &&
-      !prober.io.state.valid && !wb.io.difftest_busy.get
+      !prober.io.state.valid && !wb.io.difftest_busy.get &&
+      !tl_out.a.valid && !tl_out.b.valid && !tl_out.c.valid &&
+      !tl_out.d.valid && !tl_out.e.valid
   }
 
 }
