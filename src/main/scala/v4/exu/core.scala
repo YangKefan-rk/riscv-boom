@@ -815,6 +815,7 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
   }
 
   if (boomParams.enableDifftest) {
+    io.difftest.get.hartid := io.hartid
     val identities = Module(new boom.v4.difftest.DifftestIdentityAllocator(coreWidth, numRobEntries))
     identities.io.epoch := io.difftest_control.get.epoch
     identities.io.allocate := dis_fire

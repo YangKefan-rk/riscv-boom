@@ -17,12 +17,14 @@ import freechips.rocketchip.util._
 import freechips.rocketchip.rocket._
 
 import boom.v4.common._
+import boom.v4.difftest._
 import boom.v4.exu.BrUpdateInfo
 import boom.v4.util._
 
 
 class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCacheModule()(p) {
   val io = IO(new Bundle {
+    val difftest_busy = if (p(TileKey).core.asInstanceOf[BoomCoreParams].enableDifftest) Some(Output(Bool())) else None
     val req = Flipped(Decoupled(new WritebackReq(edge.bundle)))
     val meta_read = Decoupled(new L1MetaReadReq)
     val resp = Output(Bool())
@@ -37,6 +39,7 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
   val req = Reg(new WritebackReq(edge.bundle))
   val s_invalid :: s_fill_buffer :: s_lsu_release :: s_active :: s_grant :: Nil = Enum(5)
   val state = RegInit(s_invalid)
+  io.difftest_busy.foreach(_ := state =/= s_invalid)
   val r1_data_req_fired = RegInit(false.B)
   val r2_data_req_fired = RegInit(false.B)
   val r1_data_req_cnt = Reg(UInt(log2Up(refillCycles+1).W))
@@ -431,6 +434,8 @@ class BoomNonBlockingDCache(staticIdForMetadataUseOnly: Int)(implicit p: Paramet
 
 
 class BoomDCacheBundle(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p) {
+  val difftest_control = if (boomParams.enableDifftest) Some(Input(new DifftestControl)) else None
+  val difftest = if (boomParams.enableDifftest) Some(Output(new DifftestCacheObservation(lsuWidth))) else None
   val errors = new DCacheErrors
   val lsu   = Flipped(new LSUDMemIO)
 }
@@ -458,6 +463,10 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val wb = Module(new BoomWritebackUnit)
   val prober = Module(new BoomProbeUnit)
   val mshrs = Module(new BoomMSHRFile)
+  if (boomParams.enableDifftest) {
+    mshrs.io.difftest_control.get := io.difftest_control.get
+    io.difftest.get := 0.U.asTypeOf(io.difftest.get)
+  }
   mshrs.io.clear_all    := io.lsu.force_order
   mshrs.io.brupdate       := io.lsu.brupdate
   mshrs.io.exception    := io.lsu.exception
@@ -629,6 +638,11 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val s0_send_resp_or_nack = Mux(io.lsu.req.fire, s0_valid,
     VecInit(Mux(mshrs.io.replay.fire && isRead(mshrs.io.replay.bits.uop.mem_cmd), 1.U(lsuWidth.W), 0.U(lsuWidth.W)).asBools))
 
+
+  // The synchronous array reads on the S0 edge. S2 chooses the final word;
+  // its response delivery cycle does not replace this source timestamp.
+  val difftest_s1_read_cycle = if (boomParams.enableDifftest) Some(RegNext(io.difftest_control.get.cycle)) else None
+  val difftest_s2_read_cycle = if (boomParams.enableDifftest) Some(RegNext(difftest_s1_read_cycle.get)) else None
 
   val s1_req          = RegNext(s0_req)
   for (w <- 0 until lsuWidth)
@@ -921,6 +935,30 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
                        Mux(s5_bypass(w), s5_req.data,
                                          s2_data_word_prebypass(w))))
   }
+  if (boomParams.enableDifftest) {
+    for (w <- 0 until lsuWidth) {
+      val sample = io.lsu.resp(w).bits.difftest.get
+      sample := 0.U.asTypeOf(sample)
+      sample.identity := s2_req(w).uop.difftest.get
+      sample.queue_index := GetRealLSQIdx(s2_req(w).uop.ldq_idx)
+      sample.mem_size := s2_req(w).uop.mem_size
+      val bypass = s3_bypass(w) || s4_bypass(w) || s5_bypass(w)
+      val writer = Mux(s3_bypass(w), s3_req, Mux(s4_bypass(w), s4_req, s5_req))
+      sample.source_cycle := Mux(bypass, io.difftest_control.get.cycle, difftest_s2_read_cycle.get)
+      sample.source_valid := true.B
+      sample.source_kind := Mux(bypass, DifftestLoadSource.storePipeline, DifftestLoadSource.sram)
+      sample.address := s2_req(w).addr
+      sample.raw_word := s2_data_word(w)
+      sample.byte_mask := new StoreGen(s2_req(w).uop.mem_size, s2_req(w).addr, 0.U, wordBytes).mask
+      val writer_mask = new StoreGen(writer.uop.mem_size, writer.addr, 0.U, wordBytes).mask
+      sample.writer_mask := Mux(bypass && !writer.is_hella, writer_mask & sample.byte_mask, 0.U)
+      for (byte <- 0 until 8) {
+        sample.writers(byte) := writer.uop.difftest.get
+      }
+      io.difftest.get.load(w).valid := io.lsu.resp(w).valid && !s2_req(w).is_hella
+      io.difftest.get.load(w).bits := sample
+    }
+  }
   val amoalu   = Module(new AMOALU(xLen))
   amoalu.io.mask := new StoreGen(s3_req.uop.mem_size, s3_req.addr, 0.U, xLen/8).mask
   amoalu.io.cmd  := s3_req.uop.mem_cmd
@@ -939,4 +977,22 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
 
   io.lsu.ordered := mshrs.io.fence_rdy && !s1_valid.reduce(_||_) && !s2_valid.reduce(_||_)
+  if (boomParams.enableDifftest) {
+    val record = io.difftest.get.store_applied
+    record.valid := dataWriteArb.io.in(0).fire && !s3_req.is_hella
+    record.bits.identity := s3_req.uop.difftest.get
+    record.bits.queue_index := GetRealLSQIdx(s3_req.uop.stq_idx)
+    record.bits.mem_size := s3_req.uop.mem_size
+    record.bits.source_cycle := io.difftest_control.get.cycle
+    record.bits.address := s3_req.addr
+    record.bits.word := s3_req.data
+    record.bits.byte_mask := new StoreGen(s3_req.uop.mem_size, s3_req.addr, 0.U, wordBytes).mask
+    record.bits.atomic := s3_req.uop.is_amo
+    record.bits.command := s3_req.uop.mem_cmd
+    // Include S3: the functional 'ordered' output only counts S1/S2.
+    io.difftest.get.idle := mshrs.io.difftest_idle.get && !s0_valid.asUInt.orR &&
+      !s1_valid.asUInt.orR && !s2_valid.asUInt.orR && !s3_valid &&
+      !prober.io.state.valid && !wb.io.difftest_busy.get
+  }
+
 }

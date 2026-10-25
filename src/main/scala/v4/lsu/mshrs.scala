@@ -17,6 +17,7 @@ import freechips.rocketchip.util._
 import freechips.rocketchip.rocket._
 
 import boom.v4.common._
+import boom.v4.difftest._
 import boom.v4.exu.BrUpdateInfo
 import boom.v4.util._
 
@@ -37,6 +38,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   with HasL1HellaCacheParameters
 {
   val io = IO(new Bundle {
+    val difftest_control = if (boomParams.enableDifftest) Some(Input(new DifftestControl)) else None
     val id = Input(UInt())
 
     val req_pri_val = Input(Bool())
@@ -183,7 +185,12 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   io.wb_req.bits.source    := io.id
   io.wb_req.bits.voluntary := true.B
   io.resp.valid          := false.B
-  io.resp.bits           := rpq.io.deq.bits
+  io.resp.bits.uop       := rpq.io.deq.bits.uop
+  io.resp.bits.data      := rpq.io.deq.bits.data
+  io.resp.bits.is_hella  := rpq.io.deq.bits.is_hella
+  if (boomParams.enableDifftest) {
+    io.resp.bits.difftest.get := 0.U.asTypeOf(io.resp.bits.difftest.get)
+  }
   io.commit_val          := false.B
   io.commit_addr         := req.addr
   io.commit_coh          := coh_on_grant
@@ -284,6 +291,36 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.resp.valid     := rpq.io.deq.valid && drain_load
     io.resp.bits.data := loadgen.data
     io.resp.bits.is_hella := rpq.io.deq.bits.is_hella
+    if (boomParams.enableDifftest) {
+      val held = RegInit(false.B)
+      val held_sample = Reg(new DifftestLoadSample)
+      val sample = Wire(new DifftestLoadSample)
+      sample := 0.U.asTypeOf(sample)
+      sample.identity := rpq.io.deq.bits.uop.difftest.get
+      sample.queue_index := GetRealLSQIdx(rpq.io.deq.bits.uop.ldq_idx)
+      sample.mem_size := rpq.io.deq.bits.uop.mem_size
+      sample.source_cycle := io.difftest_control.get.cycle
+      sample.source_valid := true.B
+      sample.source_kind := DifftestLoadSource.lineBuffer
+      sample.address := rp_addr
+      sample.raw_word := data_word
+      sample.byte_mask := new StoreGen(rpq.io.deq.bits.uop.mem_size, rp_addr, 0.U, wordBytes).mask
+      val held_matches = held && held_sample.identity.uid === sample.identity.uid &&
+        held_sample.identity.epoch === sample.identity.epoch &&
+        held_sample.identity.attempt === sample.identity.attempt
+      io.resp.bits.difftest.get := Mux(held_matches, held_sample, sample)
+      when (io.resp.valid && !io.resp.ready && !held_matches) {
+        held_sample := sample
+        held := true.B
+      }
+      when (io.resp.fire || !rpq.io.deq.valid || state =/= s_drain_rpq_loads) {
+        held := false.B
+      }
+      when (held_matches && io.resp.valid) {
+        assert(held_sample.raw_word === data_word,
+          "DiffTest MSHR data changed after its source sample")
+      }
+    }
     when (rpq.io.deq.fire) {
       commit_line   := true.B
     }
@@ -390,6 +427,7 @@ class BoomIOMSHR(id: Int)(implicit edge: TLEdgeOut, p: Parameters) extends BoomM
   with HasL1HellaCacheParameters
 {
   val io = IO(new Bundle {
+    val difftest_control = if (boomParams.enableDifftest) Some(Input(new DifftestControl)) else None
     val req  = Flipped(Decoupled(new BoomDCacheReq))
     val resp = Decoupled(new BoomDCacheResp)
     val mem_access = Decoupled(new TLBundleA(edge.bundle))
@@ -407,6 +445,7 @@ class BoomIOMSHR(id: Int)(implicit edge: TLEdgeOut, p: Parameters) extends BoomM
 
   val req = Reg(new BoomDCacheReq)
   val grant_word = Reg(UInt(wordBits.W))
+  val difftest_grant_cycle = if (boomParams.enableDifftest) Some(Reg(UInt(64.W))) else None
 
   val s_idle :: s_mem_access :: s_mem_ack :: s_resp :: Nil = Enum(4)
 
@@ -449,6 +488,19 @@ class BoomIOMSHR(id: Int)(implicit edge: TLEdgeOut, p: Parameters) extends BoomM
   io.resp.bits.uop  := req.uop
   io.resp.bits.data := loadgen.data
   io.resp.bits.is_hella := req.is_hella
+  if (boomParams.enableDifftest) {
+    val sample = io.resp.bits.difftest.get
+    sample := 0.U.asTypeOf(sample)
+    sample.identity := req.uop.difftest.get
+    sample.queue_index := GetRealLSQIdx(req.uop.ldq_idx)
+    sample.mem_size := req.uop.mem_size
+    sample.source_cycle := difftest_grant_cycle.get
+    sample.source_valid := true.B
+    sample.source_kind := DifftestLoadSource.uncached
+    sample.address := req.addr
+    sample.raw_word := grant_word
+    sample.byte_mask := new StoreGen(req.uop.mem_size, req.addr, 0.U, wordBytes).mask
+  }
 
   when (io.req.fire) {
     req   := io.req.bits
@@ -461,6 +513,9 @@ class BoomIOMSHR(id: Int)(implicit edge: TLEdgeOut, p: Parameters) extends BoomM
     state := s_resp
     when (isRead(req.uop.mem_cmd)) {
       grant_word := wordFromBeat(req.addr, io.mem_ack.bits.data)
+      if (boomParams.enableDifftest) {
+        difftest_grant_cycle.get := io.difftest_control.get.cycle
+      }
     }
   }
   when (state === s_resp) {
@@ -499,6 +554,8 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
   with HasL1HellaCacheParameters
 {
   val io = IO(new Bundle {
+    val difftest_idle = if (boomParams.enableDifftest) Some(Output(Bool())) else None
+    val difftest_control = if (boomParams.enableDifftest) Some(Input(new DifftestControl)) else None
     val req  = Flipped(Vec(lsuWidth, Decoupled(new BoomDCacheReqInternal))) // Req from s2 of DCache pipe
     val req_is_probe = Input(Vec(lsuWidth, Bool()))
     val resp = Decoupled(new BoomDCacheResp)
@@ -600,6 +657,9 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
   val pri_val = req.valid && sdq_rdy && cacheable && !idx_match(req_idx)
   val mshrs = (0 until cfg.nMSHRs) map { i =>
     val mshr = Module(new BoomMSHR)
+    if (boomParams.enableDifftest) {
+      mshr.io.difftest_control.get := io.difftest_control.get
+    }
     mshr.io.id := i.U(log2Ceil(cfg.nMSHRs).W)
 
     for (w <- 0 until lsuWidth) {
@@ -691,6 +751,9 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
   val mmios = (0 until nIOMSHRs) map { i =>
     val id = cfg.nMSHRs + 1 + i // +1 for wb unit
     val mshr = Module(new BoomIOMSHR(id))
+    if (boomParams.enableDifftest) {
+      mshr.io.difftest_control.get := io.difftest_control.get
+    }
 
     mmio_alloc_arb.io.in(i).valid := mshr.io.req.ready
     mmio_alloc_arb.io.in(i).bits  := DontCare
@@ -722,6 +785,11 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
   respq.io.flush     := io.exception
   respq.io.enq       <> resp_arb.io.out
   io.resp            <> respq.io.deq
+  if (boomParams.enableDifftest) {
+    io.difftest_idle.get := io.fence_rdy && respq.io.empty && !resp_arb.io.out.valid &&
+      !io.req.map(_.valid).reduce(_ || _) && !io.replay.valid && !io.mem_acquire.valid &&
+      !io.mem_finish.valid && !io.refill.valid && !io.meta_write.valid && !io.wb_req.valid
+  }
 
   for (w <- 0 until lsuWidth) {
     io.req(w).ready      := (w.U === req_idx) &&

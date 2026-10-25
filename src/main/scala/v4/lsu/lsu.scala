@@ -52,6 +52,7 @@ import freechips.rocketchip.tilelink._
 import freechips.rocketchip.util.Str
 
 import boom.v4.common._
+import boom.v4.difftest._
 import boom.v4.exu.{BrUpdateInfo, Exception, CommitSignals, MemGen, ExeUnitResp, Wakeup}
 import boom.v4.util._
 
@@ -66,6 +67,7 @@ class BoomDCacheReq(implicit p: Parameters) extends BoomBundle()(p)
 class BoomDCacheResp(implicit p: Parameters) extends BoomBundle()(p)
   with HasBoomUOP
 {
+  val difftest = if (boomParams.enableDifftest) Some(new DifftestLoadSample) else None
   val data = Bits(coreDataBits.W)
   val is_hella = Bool()
 }
@@ -164,6 +166,8 @@ class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
 
 class LSUIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
 {
+  val difftest_control = if (boomParams.enableDifftest) Some(Input(new DifftestControl)) else None
+  val difftest = if (boomParams.enableDifftest) Some(Output(new DifftestLsuObservation(lsuWidth, coreWidth))) else None
   val ptw   = new rocket.TLBPTWIO
   val core  = new LSUCoreIO
   val dmem  = new LSUDMemIO
@@ -215,6 +219,13 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 {
   val io = IO(new LSUIO)
 
+
+  val difftest_ldq_generations = if (boomParams.enableDifftest) Some(RegInit(VecInit(Seq.fill(numLdqEntries)(0.U(64.W))))) else None
+  val difftest_stq_generations = if (boomParams.enableDifftest) Some(RegInit(VecInit(Seq.fill(numStqEntries)(0.U(64.W))))) else None
+  val difftest_attempts = if (boomParams.enableDifftest) Some(RegInit(VecInit(Seq.fill(numLdqEntries)(0.U(32.W))))) else None
+  if (boomParams.enableDifftest) {
+    io.difftest.get := 0.U.asTypeOf(io.difftest.get)
+  }
 
   // invariant: saq cannot dequeue when there are older loads uncommitted
   //val ldq                 = Reg(Vec(numLdqEntries, Valid(new LDQEntry)))
@@ -375,6 +386,28 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     val dis_ld_val = io.core.dis_uops(w).valid && io.core.dis_uops(w).bits.uses_ldq && !io.core.dis_uops(w).bits.exception
     val dis_st_val = io.core.dis_uops(w).valid && io.core.dis_uops(w).bits.uses_stq && !io.core.dis_uops(w).bits.exception
 
+    if (boomParams.enableDifftest) {
+      val load_index = GetRealLSQIdx(io.core.dis_uops(w).bits.ldq_idx)
+      val store_index = GetRealLSQIdx(io.core.dis_uops(w).bits.stq_idx)
+      val record = io.difftest.get.allocate(w)
+      record.valid := dis_ld_val || dis_st_val
+      record.bits.identity := io.core.dis_uops(w).bits.difftest.get
+      record.bits.identity.memory_generation := Mux(dis_ld_val,
+        difftest_ldq_generations.get(load_index) + 1.U, difftest_stq_generations.get(store_index) + 1.U)
+      record.bits.source_cycle := io.difftest_control.get.cycle
+      record.bits.index := Mux(dis_ld_val, load_index, store_index)
+      record.bits.load := dis_ld_val
+      when (dis_ld_val) {
+        assert(!difftest_ldq_generations.get(load_index).andR, "DiffTest LDQ generation exhausted")
+        difftest_ldq_generations.get(load_index) := difftest_ldq_generations.get(load_index) + 1.U
+        difftest_attempts.get(load_index) := 0.U
+      }
+      when (dis_st_val) {
+        assert(!difftest_stq_generations.get(store_index).andR, "DiffTest STQ generation exhausted")
+        difftest_stq_generations.get(store_index) := difftest_stq_generations.get(store_index) + 1.U
+      }
+    }
+
     dis_uops(w).valid := dis_ld_val || dis_st_val
     dis_uops(w).bits  := io.core.dis_uops(w).bits
 
@@ -395,6 +428,9 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       val ldq_idx = dis_uops(w).bits.ldq_idx
       ldq_valid          (ldq_idx)       := !IsKilledByBranch(io.core.brupdate, io.core.exception, dis_uops(w).bits)
       ldq_uop            (ldq_idx)       := UpdateBrMask(io.core.brupdate, dis_uops(w).bits)
+      if (boomParams.enableDifftest) {
+        ldq_uop(ldq_idx).difftest.get.memory_generation := difftest_ldq_generations.get(GetRealLSQIdx(ldq_idx))
+      }
       ldq_addr           (ldq_idx).valid := false.B
       ldq_executed       (ldq_idx)       := false.B
       ldq_will_succeed   (ldq_idx)       := false.B
@@ -406,6 +442,9 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       val stq_idx = dis_uops(w).bits.stq_idx
       stq_valid          (stq_idx)        := !IsKilledByBranch(io.core.brupdate, io.core.exception, dis_uops(w).bits)
       stq_uop            (stq_idx)        := UpdateBrMask(io.core.brupdate, dis_uops(w).bits)
+      if (boomParams.enableDifftest) {
+        stq_uop(stq_idx).difftest.get.memory_generation := difftest_stq_generations.get(GetRealLSQIdx(stq_idx))
+      }
       stq_addr           (stq_idx).valid  := false.B
       stq_data           (stq_idx).valid  := false.B
       stq_committed      (stq_idx)        := false.B
@@ -990,6 +1029,37 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
   }
 
+  val difftest_begin = if (boomParams.enableDifftest) Some(Wire(Vec(lsuWidth, Valid(new DifftestAttempt)))) else None
+  val difftest_mem_attempt = if (boomParams.enableDifftest) Some(RegNext(difftest_begin.get)) else None
+  if (boomParams.enableDifftest) {
+    for (w <- 0 until lsuWidth) {
+      val translated = will_fire_load_agen(w) || will_fire_load_agen_exec(w) || will_fire_load_retry(w)
+      val uop = Mux(will_fire_load_wakeup(w), ldq_wakeup_e.bits.uop, exe_tlb_uop(w))
+      val index = GetRealLSQIdx(uop.ldq_idx)
+      val begin = difftest_begin.get(w)
+      // Track the opportunity before translation/protection outcomes. The LSU
+      // may form a forwarding result even for an instruction which later traps;
+      // S1 cancellation or whole-instruction squash closes those attempts.
+      begin.valid := (translated || will_fire_load_wakeup(w)) &&
+        !IsKilledByBranch(io.core.brupdate, io.core.exception, uop)
+      begin.bits.identity := uop.difftest.get
+      begin.bits.identity.memory_generation := difftest_ldq_generations.get(index)
+      begin.bits.identity.attempt := difftest_attempts.get(index) + 1.U
+      begin.bits.source_cycle := io.difftest_control.get.cycle
+      begin.bits.address := Mux(will_fire_load_wakeup(w), ldq_wakeup_e.bits.addr.bits, exe_tlb_paddr(w))
+      begin.bits.queue_index := index
+      io.difftest.get.begin(w) := begin
+      when (begin.valid) {
+        assert(!difftest_attempts.get(index).andR, "DiffTest load attempt exhausted")
+        difftest_attempts.get(index) := begin.bits.identity.attempt
+        ldq_uop(uop.ldq_idx).difftest.get.attempt := begin.bits.identity.attempt
+      }
+      when (dmem_req(w).valid && dmem_req(w).bits.uop.uses_ldq && !dmem_req(w).bits.is_hella) {
+        dmem_req(w).bits.uop.difftest.get := begin.bits.identity
+      }
+    }
+  }
+
   //-------------------------------------------------------------
   // Write data into the STQ
   for (dgen <- io.core.dgen) {
@@ -1173,7 +1243,13 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
   val wb_ldst_forward_matches  = RegNext(ldst_forward_matches)
   val wb_ldst_forward_valid    = Wire(Vec(lsuWidth, Bool()))
-  val wb_ldst_forward_e        = widthMap(w => RegNext(UpdateBrMask(io.core.brupdate, ldq_read(lcam_ldq_idx(w)).bits)))
+  val wb_ldst_forward_e        = widthMap(w => WireInit(RegNext(UpdateBrMask(io.core.brupdate, ldq_read(lcam_ldq_idx(w)).bits))))
+  val difftest_wb_attempt = if (boomParams.enableDifftest) Some(RegNext(difftest_mem_attempt.get)) else None
+  if (boomParams.enableDifftest) {
+    for (w <- 0 until lsuWidth) {
+      wb_ldst_forward_e(w).uop.difftest.get := difftest_wb_attempt.get(w).bits.identity
+    }
+  }
   val wb_ldst_forward_ldq_idx  = SafeRegNext(lcam_ldq_idx)
   val wb_ldst_forward_ld_addr  = RegNext(lcam_addr)
   val wb_ldst_forward_stq_idx  = Wire(Vec(lsuWidth, UInt((stqAddrSz+1).W)))
@@ -1539,6 +1615,24 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     wb_slow_wakeups(w).valid := false.B
     wb_slow_wakeups(w).bits  := DontCare
 
+    if (boomParams.enableDifftest) {
+      val previous = difftest_wb_attempt.get(w)
+      val cache_survives = RegNext(dmem_req_fire(w) && !s0_kills(w)) && !io.dmem.s1_kill(w)
+      // Wait for the real WB forwarding decision. A speculative S1 candidate
+      // is insufficient: it may lose to another response, or become valid only
+      // after the registered CAM matches have reached the forwarding stage.
+      val cache_candidate_died = RegNext(difftest_mem_attempt.get(w).valid && !cache_survives)
+      io.difftest.get.cancel(w).valid := cache_candidate_died &&
+        (!wb_ldst_forward_valid(w) || dmem_resp_fired(w))
+      io.difftest.get.cancel(w).bits := previous.bits
+      io.difftest.get.cancel(w).bits.source_cycle := io.difftest_control.get.cycle
+      io.difftest.get.nack(w).valid := io.dmem.nack(w).valid &&
+        io.dmem.nack(w).bits.uop.uses_ldq && !io.dmem.nack(w).bits.is_hella
+      io.difftest.get.nack(w).bits.identity := io.dmem.nack(w).bits.uop.difftest.get
+      io.difftest.get.nack(w).bits.source_cycle := io.difftest_control.get.cycle
+      io.difftest.get.nack(w).bits.address := io.dmem.nack(w).bits.addr
+      io.difftest.get.nack(w).bits.queue_index := GetRealLSQIdx(io.dmem.nack(w).bits.uop.ldq_idx)
+    }
     // Handle nacks
     when (io.dmem.nack(w).valid) {
       when (io.dmem.nack(w).bits.is_hella) {
@@ -1565,6 +1659,17 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
         assert(!resp.is_hella)
         val ldq_idx = resp.uop.ldq_idx
         val uop = WireInit(ldq_uop(ldq_idx))
+        if (boomParams.enableDifftest) {
+          // The packet carries its identity; never relabel a late packet from the current slot.
+          uop.difftest.get := resp.uop.difftest.get
+          assert(ldq_valid(ldq_idx) && resp.uop.difftest.get.uid === ldq_uop(ldq_idx).difftest.get.uid &&
+            resp.uop.difftest.get.epoch === ldq_uop(ldq_idx).difftest.get.epoch &&
+            resp.uop.difftest.get.memory_generation === ldq_uop(ldq_idx).difftest.get.memory_generation &&
+            resp.uop.difftest.get.attempt === difftest_attempts.get(GetRealLSQIdx(ldq_idx)),
+            "DiffTest response belongs to a cancelled attempt or reused LDQ slot")
+          io.difftest.get.complete(w).valid := true.B
+          io.difftest.get.complete(w).bits := resp.difftest.get
+        }
         val send_iresp = uop.dst_rtype === RT_FIX
         val send_fresp = uop.dst_rtype === RT_FLT
 
@@ -1609,9 +1714,24 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
         stq_debug_wb_data(resp.uop.stq_idx) := resp.data
       }
     }
+    if (boomParams.enableDifftest) {
+      io.difftest.get.store_ack(w).valid := io.dmem.store_ack(w).valid && !io.dmem.store_ack(w).bits.is_hella
+      io.difftest.get.store_ack(w).bits.identity := io.dmem.store_ack(w).bits.uop.difftest.get
+      io.difftest.get.store_ack(w).bits.source_cycle := io.difftest_control.get.cycle
+      io.difftest.get.store_ack(w).bits.address := io.dmem.store_ack(w).bits.addr
+      io.difftest.get.store_ack(w).bits.queue_index := GetRealLSQIdx(io.dmem.store_ack(w).bits.uop.stq_idx)
+    }
     // Handle store acks
     when (io.dmem.store_ack(w).valid && !io.dmem.store_ack(w).bits.is_hella) {
       stq_succeeded(io.dmem.store_ack(w).bits.uop.stq_idx) := true.B
+      if (boomParams.enableDifftest) {
+        val index = io.dmem.store_ack(w).bits.uop.stq_idx
+        val identity = io.dmem.store_ack(w).bits.uop.difftest.get
+        assert(stq_valid(index) && identity.uid === stq_uop(index).difftest.get.uid &&
+          identity.epoch === stq_uop(index).difftest.get.epoch &&
+          identity.memory_generation === stq_uop(index).difftest.get.memory_generation,
+          "DiffTest store acknowledgement belongs to a reused STQ slot")
+      }
     }
 
 
@@ -1652,6 +1772,28 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       ldq_forward_stq_idx(f_idx) := wb_ldst_forward_stq_idx(w)
 
       ldq_debug_wb_data  (f_idx) := loadgen.data
+      if (boomParams.enableDifftest) {
+        val record = io.difftest.get.forward(w)
+        record.valid := true.B
+        record.bits.identity := forward_uop.difftest.get
+        record.bits.queue_index := GetRealLSQIdx(forward_uop.ldq_idx)
+        record.bits.mem_size := forward_uop.mem_size
+        record.bits.source_cycle := io.difftest_control.get.cycle
+        record.bits.source_valid := true.B
+        record.bits.source_kind := DifftestLoadSource.storeQueue
+        record.bits.address := wb_ldst_forward_ld_addr(w)
+        record.bits.raw_word := storegen.data
+        record.bits.byte_mask := GenByteMask(wb_ldst_forward_ld_addr(w), forward_uop.mem_size)
+        record.bits.writer_mask := record.bits.byte_mask
+        for (byte <- 0 until 8) {
+          record.bits.writers(byte) := stq_uop(s_idx).difftest.get
+        }
+        io.difftest.get.complete(w) := record
+        assert(forward_uop.difftest.get.uid === ldq_uop(f_idx).difftest.get.uid &&
+          forward_uop.difftest.get.memory_generation === ldq_uop(f_idx).difftest.get.memory_generation &&
+          forward_uop.difftest.get.attempt === difftest_attempts.get(GetRealLSQIdx(f_idx)),
+          "DiffTest forwarding belongs to a reused LDQ slot")
+      }
     }
 
     // Forward loads to store-data
@@ -1752,6 +1894,20 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     // val ldq_e = WireInit(ldq(temp_ldq_head))
     val l_uop = WireInit(ldq_uop(temp_ldq_head))
     val s_uop = WireInit(stq_uop(temp_stq_commit_head))
+    if (boomParams.enableDifftest) {
+      val record = io.difftest.get.local_store(w)
+      record.valid := commit_store && io.core.commit.arch_valids(w) && !s_uop.is_fence
+      record.bits.identity := s_uop.difftest.get
+      record.bits.queue_index := GetRealLSQIdx(temp_stq_commit_head)
+      record.bits.mem_size := s_uop.mem_size
+      record.bits.source_cycle := io.difftest_control.get.cycle
+      record.bits.address := stq_addr(temp_stq_commit_head).bits
+      record.bits.word := new rocket.StoreGen(s_uop.mem_size, record.bits.address,
+        stq_data(temp_stq_commit_head).bits, coreDataBytes).data
+      record.bits.byte_mask := GenByteMask(record.bits.address, s_uop.mem_size)
+      record.bits.atomic := s_uop.is_amo
+      record.bits.command := s_uop.mem_cmd
+    }
     when (commit_store)
     {
       stq_committed  (temp_stq_commit_head) := true.B
@@ -1763,6 +1919,16 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
         "[lsu] trying to commit an un-executed load entry.")
 
       ldq_valid(temp_ldq_head)                 := false.B
+    }
+
+    if (boomParams.enableDifftest) {
+      val record = io.difftest.get.retire_load(w)
+      record.valid := commit_load && io.core.commit.arch_valids(w)
+      record.bits.identity := l_uop.difftest.get
+      record.bits.source_cycle := io.difftest_control.get.cycle
+      record.bits.address := ldq_addr(temp_ldq_head).bits
+      record.bits.queue_index := GetRealLSQIdx(temp_ldq_head)
+      io.difftest.get.retire_load_data(w) := ldq_debug_wb_data(temp_ldq_head)
     }
 
     if (MEMTRACE_PRINTF) {
@@ -1810,6 +1976,15 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     }
   }
 
+
+  if (boomParams.enableDifftest) {
+    io.difftest.get.store_release.valid := clear_store
+    io.difftest.get.store_release.bits.identity := stq_uop(stq_head).difftest.get
+    io.difftest.get.store_release.bits.source_cycle := io.difftest_control.get.cycle
+    io.difftest.get.store_release.bits.address := stq_addr(stq_head).bits
+    io.difftest.get.store_release.bits.queue_index := GetRealLSQIdx(stq_head)
+    io.difftest.get.queues_empty := !ldq_valid.asUInt.orR && !stq_valid.asUInt.orR && io.dmem.ordered
+  }
 
   // -----------------------
   // Hellacache interface

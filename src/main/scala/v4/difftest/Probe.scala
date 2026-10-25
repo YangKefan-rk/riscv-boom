@@ -96,6 +96,7 @@ class DifftestTrap extends Bundle
 
 class DifftestCoreObservation(width: Int, entries: Int) extends Bundle
 {
+  val hartid = UInt(64.W)
   val allocate = Vec(width, Valid(new DifftestInstruction))
   val retire = Vec(width, Valid(new DifftestInstruction))
   val squash = Vec(entries, Valid(new DifftestSquash))
