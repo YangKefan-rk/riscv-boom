@@ -44,6 +44,9 @@ class RobIo(
   val numWakeupPorts: Int
   )(implicit p: Parameters)  extends BoomBundle
 {
+  val difftest_squash = if (boomParams.enableDifftest) Some(Output(Vec(numRobEntries, Valid(new boom.v4.difftest.DifftestSquash)))) else None
+  val difftest_trap = if (boomParams.enableDifftest) Some(Output(Valid(new boom.v4.difftest.DifftestTrap))) else None
+
   // Decode Stage
   // (Allocate, write instruction to ROB).
   val enq_valids       = Input(Vec(coreWidth, Bool()))
@@ -477,6 +480,20 @@ class Rob(
       }
     }
 
+    if (boomParams.enableDifftest) {
+      for (i <- 0 until numRobRows) {
+        val branch_kill = io.brupdate.b2.mispredict && (brupdate_b2_rob_clr_oh(i) ||
+          (brupdate_b2_rob_row_oh(i) && brupdate_b2_rob_bank_clr_oh(w)))
+        val record = io.difftest_squash.get(i * coreWidth + w)
+        record.valid := rob_val(i) && (rob_state === s_rollback || branch_kill) &&
+          !(will_commit(w) && rob_head === i.U)
+        record.bits.identity := rob_uop(i).difftest.get
+        record.bits.source_cycle := 0.U // Set by the core's shared source clock.
+        record.bits.rob_index := (i * coreWidth + w).U
+        record.bits.rollback := rob_state === s_rollback
+      }
+    }
+
     // -----------------------------------------------
     // Kill speculated entries on branch mispredict
     for (i <- 0 until numRobRows) {
@@ -540,6 +557,14 @@ class Rob(
         rob_debug_wdata(GetRowIdx(rob_idx)) := io.wb_resps(i).bits.data
       }
       val temp_uop = rob_uop(GetRowIdx(rob_idx))
+      if (boomParams.enableDifftest) {
+        when (io.wb_resps(i).valid && MatchBank(GetBankIdx(rob_idx))) {
+          assert(io.wb_resps(i).bits.uop.difftest.get.epoch === rob_uop(GetRowIdx(rob_idx)).difftest.get.epoch &&
+            io.wb_resps(i).bits.uop.difftest.get.uid === rob_uop(GetRowIdx(rob_idx)).difftest.get.uid &&
+            io.wb_resps(i).bits.uop.difftest.get.rob_generation === rob_uop(GetRowIdx(rob_idx)).difftest.get.rob_generation,
+            "DiffTest writeback belongs to a reused ROB slot")
+        }
+      }
 
       assert (!(io.wb_resps(i).valid && MatchBank(GetBankIdx(rob_idx)) &&
                !rob_val(GetRowIdx(rob_idx))),
@@ -620,6 +645,14 @@ class Rob(
                                                 exception_thrown && !is_mini_exception,
                                                 flush_commit && flush_uop.is_eret,
                                                 refetch_inst)
+
+  if (boomParams.enableDifftest) {
+    io.difftest_trap.get.valid := io.com_xcpt.valid
+    io.difftest_trap.get.bits.identity := r_xcpt_uop.difftest.get
+    io.difftest_trap.get.bits.source_cycle := 0.U
+    io.difftest_trap.get.bits.pc := Sext(r_xcpt_uop.debug_pc, 64)
+    io.difftest_trap.get.bits.cause := io.com_xcpt.bits.cause
+  }
 
   io.rollback := rob_state === s_rollback
 

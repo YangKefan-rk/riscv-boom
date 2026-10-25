@@ -117,6 +117,7 @@ case class BoomCoreParams(
   trace: Boolean = false,
 
   /* debug stuff */
+  enableDifftest: Boolean = false,
   enableCommitLogPrintf: Boolean = false,
   enableBranchPrintf: Boolean = false,
   enableMemtracePrintf: Boolean = false,

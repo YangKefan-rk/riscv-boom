@@ -26,6 +26,8 @@ class MicroOp(implicit p: Parameters) extends BoomBundle
   with freechips.rocketchip.rocket.constants.MemoryOpConstants
   with freechips.rocketchip.rocket.constants.ScalarOpConstants
 {
+  val difftest = if (boomParams.enableDifftest) Some(new boom.v4.difftest.DifftestIdentity) else None
+
   val inst             = UInt(32.W)
   val debug_inst       = UInt(32.W)
   val is_rvc           = Bool()

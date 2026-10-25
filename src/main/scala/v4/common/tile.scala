@@ -254,6 +254,15 @@ class BoomTileModuleImp(outer: BoomTile) extends BaseTileModuleImp(outer){
     (core.io.rocc.csrs zip outer.roccs.map(_.module.io.csrs).flatten).foreach { t => t._2 <> t._1 }
   }
 
+  // Private BOOM probe port; the Chipyard harness owns transport and source-clock binding.
+  val difftest_control = if (outer.boomParams.core.enableDifftest) Some(IO(Input(new boom.v4.difftest.DifftestControl))) else None
+  val difftest_core = if (outer.boomParams.core.enableDifftest) Some(IO(Output(
+    new boom.v4.difftest.DifftestCoreObservation(outer.boomParams.core.decodeWidth, outer.boomParams.core.numRobEntries)))) else None
+  if (outer.boomParams.core.enableDifftest) {
+    core.io.difftest_control.get := difftest_control.get
+    difftest_core.get := core.io.difftest.get
+  }
+
   // PTW
   val ptw  = Module(new PTW(ptwPorts.length)(outer.dcache.node.edges.out(0), outer.p))
   core.io.ptw <> ptw.io.dpath

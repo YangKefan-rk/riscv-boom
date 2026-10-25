@@ -57,6 +57,8 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
                                             xlen = coreParams.xLen, iaddrWidth = vaddrBitsExtended) 
   val io = IO(new freechips.rocketchip.tile.CoreBundle
   {
+    val difftest_control = if (boomParams.enableDifftest) Some(Input(new boom.v4.difftest.DifftestControl)) else None
+    val difftest = if (boomParams.enableDifftest) Some(Output(new boom.v4.difftest.DifftestCoreObservation(coreWidth, numRobEntries))) else None
     val hartid = Input(UInt(hartIdLen.W))
     val interrupts = Input(new freechips.rocketchip.rocket.CoreInterrupts(false))
     val ifu = new boom.v4.ifu.BoomFrontendIO
@@ -810,6 +812,48 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
       dis_uops(w).rob_idx := Cat(rob.io.rob_tail_idx >> log2Ceil(coreWidth).U,
                                w.U(log2Ceil(coreWidth).W))
     }
+  }
+
+  if (boomParams.enableDifftest) {
+    val identities = Module(new boom.v4.difftest.DifftestIdentityAllocator(coreWidth, numRobEntries))
+    identities.io.epoch := io.difftest_control.get.epoch
+    identities.io.allocate := dis_fire
+    identities.io.slots := VecInit(dis_uops.map(_.rob_idx))
+    for (w <- 0 until coreWidth) {
+      dis_uops(w).difftest.get := identities.io.identities(w)
+    }
+
+    def describe(uop: MicroOp, architectural: Bool, write_data: UInt): boom.v4.difftest.DifftestInstruction = {
+      val record = Wire(new boom.v4.difftest.DifftestInstruction)
+      record.identity := uop.difftest.get
+      record.source_cycle := io.difftest_control.get.cycle
+      record.pc := Sext(uop.debug_pc, 64)
+      record.instruction := uop.debug_inst
+      record.rob_index := uop.rob_idx
+      record.ldq_index := uop.ldq_idx
+      record.stq_index := uop.stq_idx
+      record.uses_ldq := uop.uses_ldq
+      record.uses_stq := uop.uses_stq
+      record.atomic := uop.is_amo
+      record.mem_command := uop.mem_cmd
+      record.mem_size := uop.mem_size
+      record.architectural := architectural
+      record.destination := uop.ldst
+      record.destination_type := uop.dst_rtype
+      record.write_data := write_data
+      record
+    }
+    for (w <- 0 until coreWidth) {
+      io.difftest.get.allocate(w).valid := dis_fire(w)
+      io.difftest.get.allocate(w).bits := describe(dis_uops(w), false.B, 0.U)
+      io.difftest.get.retire(w).valid := rob.io.commit.valids(w)
+      io.difftest.get.retire(w).bits := describe(rob.io.commit.uops(w), rob.io.commit.arch_valids(w),
+        rob.io.commit.debug_wdata(w))
+    }
+    io.difftest.get.squash := rob.io.difftest_squash.get
+    io.difftest.get.squash.foreach(_.bits.source_cycle := io.difftest_control.get.cycle)
+    io.difftest.get.trap := rob.io.difftest_trap.get
+    io.difftest.get.trap.bits.source_cycle := io.difftest_control.get.cycle
   }
 
   //-------------------------------------------------------------
