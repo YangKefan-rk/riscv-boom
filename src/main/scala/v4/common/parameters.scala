@@ -118,6 +118,9 @@ case class BoomCoreParams(
 
   /* debug stuff */
   enableDifftest: Boolean = false,
+  // Observation profile: duplicated array with a registered address, an
+  // asynchronous macro read and the existing outer data-capture register.
+  difftestSramCaptureBoundary: Boolean = false,
   enableCommitLogPrintf: Boolean = false,
   enableBranchPrintf: Boolean = false,
   enableMemtracePrintf: Boolean = false,

@@ -639,10 +639,16 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     VecInit(Mux(mshrs.io.replay.fire && isRead(mshrs.io.replay.bits.uop.mem_cmd), 1.U(lsuWidth.W), 0.U(lsuWidth.W)).asBools))
 
 
-  // The synchronous array reads on the S0 edge. S2 chooses the final word;
-  // its response delivery cycle does not replace this source timestamp.
-  val difftest_s1_read_cycle = if (boomParams.enableDifftest) Some(RegNext(io.difftest_control.get.cycle)) else None
-  val difftest_s2_read_cycle = if (boomParams.enableDifftest) Some(RegNext(difftest_s1_read_cycle.get)) else None
+  // For the explicitly qualified duplicated-array macro, the S0 edge latches
+  // the read address and the S1 edge captures its data in the array's outer
+  // RegNext. This register shares that S1 edge, so S2 observes the actual data
+  // capture cycle, not the earlier address request or later response delivery.
+  val difftest_array_capture_cycle = if (boomParams.enableDifftest)
+    Some(RegNext(io.difftest_control.get.cycle)) else None
+  val difftest_array_capture_valid = if (boomParams.enableDifftest)
+    Some(widthMap(w => RegNext(RegNext(data.io.read(w).valid, init=false.B), init=false.B))) else None
+  val difftest_sram_capture_qualified = boomParams.difftestSramCaptureBoundary &&
+    boomParams.numDCacheBanks == 1 && !dcacheSinglePorted
 
   val s1_req          = RegNext(s0_req)
   for (w <- 0 until lsuWidth)
@@ -944,8 +950,9 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
       sample.mem_size := s2_req(w).uop.mem_size
       val bypass = s3_bypass(w) || s4_bypass(w) || s5_bypass(w)
       val writer = Mux(s3_bypass(w), s3_req, Mux(s4_bypass(w), s4_req, s5_req))
-      sample.source_cycle := Mux(bypass, io.difftest_control.get.cycle, difftest_s2_read_cycle.get)
-      sample.source_valid := true.B
+      sample.source_cycle := Mux(bypass, io.difftest_control.get.cycle, difftest_array_capture_cycle.get)
+      sample.source_valid := bypass ||
+        (difftest_sram_capture_qualified.B && difftest_array_capture_valid.get(w))
       sample.source_kind := Mux(bypass, DifftestLoadSource.storePipeline, DifftestLoadSource.sram)
       sample.address := s2_req(w).addr
       sample.raw_word := s2_data_word(w)

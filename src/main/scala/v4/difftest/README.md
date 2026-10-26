@@ -40,8 +40,12 @@ into fabricated architectural retirements or mere load-attempt cancellation.
 
 ## Source sampling
 
-- SRAM hit: timestamp the S0 synchronous array read, retain it through S2 way
-  selection, and preserve the selected raw word before LoadGen extension.
+- SRAM hit: an explicitly qualified duplicated-array simulation profile uses
+  the S1 outer data-register capture edge. The S0 edge registers the read
+  address; S2 performs way selection and response delivery. The capture-cycle
+  register shares the data register's S1 edge, and its valid follows the actual
+  data-array arbiter read, not a request that may have lost arbitration.
+  Preserve the selected raw word before LoadGen extension.
 - Store-pipeline bypass: use the actual S2 bypass read cycle. Only the current
   bypass store's written bytes have an observed writer; older bytes in its
   merged word remain unknown rather than inheriting that store's identity.
@@ -53,6 +57,24 @@ into fabricated architectural retirements or mere load-attempt cancellation.
   buffer read, not the line's earlier GrantData arrival.
 - Uncached response: retain its D-channel data-capture time and source kind.
   Capturing this fact does not enable MMIO checking in the scalar consumer.
+
+`BoomCoreParams(difftestSramCaptureBoundary = true)` explicitly selects the
+SRAM observation profile proven for the current generated duplicated array:
+registered read address, asynchronous macro output, then the existing outer
+capture register. Enable it only when the embedding simulation uses that
+validated macro and a common ungated source clock. With read launch at T, a
+same-row write at T is visible to the captured response; a write at T+1 is
+excluded by the pre-write capture at T+1. The source is therefore T+1, even
+though the response is delivered at T+2. No host timestamp arithmetic is
+required, and this field does not itself assign a cross-producer phase.
+
+The profile is disabled by default. An unqualified SRAM sample keeps
+`source_valid = false`; banked and single-ported arrays also remain unqualified
+regardless of the flag. Different SRAM read-under-write semantics need their
+own capture-boundary proof before enabling this profile. This observation
+restriction does not disable instructions or change functional cache data.
+Store-pipeline bypass still uses its actual selection cycle, and MSHR line-buffer
+responses retain their original sampling cycle under backpressure.
 
 Cache miss store ACKs can precede the actual data write and STQ reuse. The uop
 identity therefore travels in each RPQ entry and its replay; a later cache write
