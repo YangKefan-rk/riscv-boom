@@ -1893,21 +1893,25 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     // val stq_e = WireInit(stq(temp_stq_commit_head))
     // val ldq_e = WireInit(ldq(temp_ldq_head))
     val l_uop = WireInit(ldq_uop(temp_ldq_head))
-    val s_uop = WireInit(stq_uop(temp_stq_commit_head))
     if (boomParams.enableDifftest) {
       val record = io.difftest.get.local_store(w)
-      record.valid := commit_store && io.core.commit.arch_valids(w) && !s_uop.is_fence
-      record.bits.identity := s_uop.difftest.get
-      record.bits.queue_index := GetRealLSQIdx(temp_stq_commit_head)
-      record.bits.mem_size := s_uop.mem_size
+      val committed_uop = io.core.commit.uops(w)
+      val committed_stq_index = GetRealLSQIdx(committed_uop.stq_idx)
+      val committed_address = stq_addr(committed_stq_index).bits
+      record.valid := commit_store && io.core.commit.arch_valids(w) && !committed_uop.is_fence
+      record.bits.identity := committed_uop.difftest.get
+      record.bits.identity.memory_generation := difftest_stq_generations.get(committed_stq_index)
+      record.bits.queue_index := committed_stq_index
+      record.bits.mem_size := committed_uop.mem_size
       record.bits.source_cycle := io.difftest_control.get.cycle
-      record.bits.address := stq_addr(temp_stq_commit_head).bits
-      record.bits.word := new rocket.StoreGen(s_uop.mem_size, record.bits.address,
-        stq_data(temp_stq_commit_head).bits, coreDataBytes).data
-      record.bits.byte_mask := GenByteMask(record.bits.address, s_uop.mem_size)
-      record.bits.atomic := s_uop.is_amo
-      record.bits.command := s_uop.mem_cmd
+      record.bits.address := committed_address
+      record.bits.word := new rocket.StoreGen(committed_uop.mem_size, committed_address,
+        stq_data(committed_stq_index).bits, coreDataBytes).data
+      record.bits.byte_mask := GenByteMask(committed_address, committed_uop.mem_size)
+      record.bits.atomic := committed_uop.is_amo
+      record.bits.command := committed_uop.mem_cmd
     }
+    val s_uop = WireInit(stq_uop(temp_stq_commit_head))
     when (commit_store)
     {
       stq_committed  (temp_stq_commit_head) := true.B
