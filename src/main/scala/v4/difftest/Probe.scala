@@ -101,4 +101,5 @@ class DifftestCoreObservation(width: Int, entries: Int) extends Bundle
   val retire = Vec(width, Valid(new DifftestInstruction))
   val squash = Vec(entries, Valid(new DifftestSquash))
   val trap = Valid(new DifftestTrap)
+  val terminal = new DifftestTerminalObservation
 }

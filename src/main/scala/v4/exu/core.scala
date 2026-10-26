@@ -403,6 +403,7 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
   // **** Fetch Stage/Frontend ****
   //-------------------------------------------------------------
   //-------------------------------------------------------------
+  val difftest_terminal_stop = WireDefault(false.B)
   io.ifu.redirect_val         := false.B
   io.ifu.redirect_flush       := false.B
 
@@ -628,7 +629,7 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
                       || io.ifu.redirect_flush))
 
   val dec_stalls = dec_hazards.scanLeft(false.B) ((s,h) => s || h).takeRight(coreWidth)
-  dec_fire := (0 until coreWidth).map(w => dec_valids(w) && !dec_stalls(w))
+  dec_fire := (0 until coreWidth).map(w => dec_valids(w) && !dec_stalls(w) && !difftest_terminal_stop)
 
   // all decoders are empty and ready for new instructions
   dec_ready := dec_fire.last
@@ -773,7 +774,7 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
   io.lsu.fence_dmem := (dis_valids zip wait_for_empty_pipeline).map {case (v,w) => v && w} .reduce(_||_)
 
   val dis_stalls = dis_hazards.scanLeft(false.B) ((s,h) => s || h).takeRight(coreWidth)
-  dis_fire := dis_valids zip dis_stalls map {case (v,s) => v && !s}
+  dis_fire := dis_valids zip dis_stalls map {case (v,s) => v && !s && !difftest_terminal_stop}
   dis_ready := !dis_stalls.last
 
   //-------------------------------------------------------------
@@ -855,6 +856,20 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
     io.difftest.get.squash.foreach(_.bits.source_cycle := io.difftest_control.get.cycle)
     io.difftest.get.trap := rob.io.difftest_trap.get
     io.difftest.get.trap.bits.source_cycle := io.difftest_control.get.cycle
+
+    val terminal = Module(new boom.v4.difftest.DifftestTerminalStop(coreWidth))
+    terminal.io.armed := PlusArg("difftest_s_boom_terminal_enable", default=0, width=1,
+      docstring="Arm the native FENCE.I terminal policy; default disabled").asBool
+    terminal.io.terminal_pc := PlusArg("difftest_s_boom_terminal_pc", default=0, width=64,
+      docstring="Decimal PC of the actual architectural FENCE.I terminal instruction")
+    terminal.io.cycle := io.difftest_control.get.cycle
+    terminal.io.retire := io.difftest.get.retire
+    terminal.io.core_empty := rob.io.empty
+    terminal.io.writeback_active := rob.io.wb_resps.map(_.valid).reduce(_ || _)
+    terminal.io.interrupt_pending := csr.io.interrupt || io.interrupts.debug ||
+      io.interrupts.nmi.map(_.rnmi).getOrElse(false.B)
+    difftest_terminal_stop := terminal.io.stop_issue
+    io.difftest.get.terminal := terminal.io.observation
   }
 
   //-------------------------------------------------------------
@@ -1296,6 +1311,14 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
 
   assert (!(csr.io.singleStep), "[core] single-step is unsupported.")
 
+  // An explicitly armed native FENCE.I terminal remains physically stopped.
+  // Do not freeze cache/coherence clocks: their tail events still drain.
+  when (difftest_terminal_stop) {
+    io.ifu.redirect_flush := true.B
+    io.ifu.redirect_val := false.B
+    assert(!dis_fire.asUInt.orR, "DiffTest dispatched after its terminal FENCE.I")
+  }
+
 
   //-------------------------------------------------------------
   // **** Flush Pipeline ****
@@ -1322,6 +1345,7 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
   when (rob.io.commit.valids.asUInt.orR ||
         csr.io.csr_stall ||
         io.rocc.busy ||
+        difftest_terminal_stop ||
         reset.asBool) {
     idle_cycles := 0.U
   }

@@ -97,3 +97,42 @@ LR/SC, floating/vector memory, split accesses, uncached IO and trap/whole-hart
 completion need the corresponding public consumer capabilities. The RTL keeps
 these identities and observations; a transport must report unsupported or
 incomplete coverage rather than dropping them to produce a pass.
+
+## Native FENCE.I terminal policy
+
+The Difftest native configuration can explicitly end a finite scalar test
+interval at an actual architectural canonical `fence.i` retirement. This policy
+is **disabled by default** and exists only when `enableDifftest` is enabled:
+
+```text
++difftest_s_boom_terminal_enable=1
++difftest_s_boom_terminal_pc=<decimal RV64 address>
+```
+
+The supplied PC is a run-setup contract, not a memory-order rank or a guessed
+program endpoint. The host must independently check that its ELF contains
+`0x0000100f` at that address and compare the actual retirement identity/PC/raw
+through the normal reference path. A fetched, wrong-path, physical-only or
+noncanonical marker cannot trigger the policy. Ordinary fences, FENCE.I at other
+PCs, and every unarmed run keep their existing behavior.
+
+The already serialized FENCE.I retires through the real ROB. Its retiring edge
+sets a persistent native stop and overrides the ordinary frontend restart with
+`redirect_flush=true`, `redirect_val=false`; the existing dispatch hazard and
+rename kill paths suppress new dynamic identities. Cache/coherence clocks stay
+running. The core watchdog does not interpret this deliberately stopped state
+as a pipeline hang. A second retirement after the stop is an assertion failure.
+
+`core.terminal` publishes the armed PC, the persistent stop/reached state and
+original marker `DifftestInstruction` identity/source cycle. It separately
+publishes the current ROB-empty fact, actual ROB writeback activity and observed
+interrupt/debug request. None of those facts is a terminal Pass certificate.
+The native adapter still must deliver the marker's ordinary retirement, all
+replays/cancellations and stores, wait for LSU/cache sources and transport to
+drain, close each source watermark, compare the marker via its own hart's REF,
+and only then ask the public HostSession to finalize. A missing marker, pending
+writeback/store/source, IRQ or later source activity must not become Pass.
+
+The current policy is an explicitly armed simulation test boundary, not an ISA
+change or a general processor halt interface. Full CSR/interrupt verification,
+all-fabric quiescence and a final dirty-DRAM image require separate support.
