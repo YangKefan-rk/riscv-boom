@@ -1897,10 +1897,11 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       val record = io.difftest.get.local_store(w)
       val committed_uop = io.core.commit.uops(w)
       val committed_stq_index = GetRealLSQIdx(committed_uop.stq_idx)
+      val stq_owner = stq_uop(committed_stq_index).difftest.get
       val committed_address = stq_addr(committed_stq_index).bits
       record.valid := commit_store && io.core.commit.arch_valids(w) && !committed_uop.is_fence
       record.bits.identity := committed_uop.difftest.get
-      record.bits.identity.memory_generation := difftest_stq_generations.get(committed_stq_index)
+      record.bits.identity.memory_generation := stq_owner.memory_generation
       record.bits.queue_index := committed_stq_index
       record.bits.mem_size := committed_uop.mem_size
       record.bits.source_cycle := io.difftest_control.get.cycle
@@ -1910,6 +1911,16 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       record.bits.byte_mask := GenByteMask(committed_address, committed_uop.mem_size)
       record.bits.atomic := committed_uop.is_amo
       record.bits.command := committed_uop.mem_cmd
+      when (record.valid) {
+        assert(stq_valid(committed_stq_index), "DiffTest LocalStore must name a live STQ owner")
+        assert(stq_owner.uid === committed_uop.difftest.get.uid &&
+          stq_owner.epoch === committed_uop.difftest.get.epoch &&
+          stq_owner.rob_generation === committed_uop.difftest.get.rob_generation &&
+          stq_owner.memory_generation === difftest_stq_generations.get(committed_stq_index),
+          "DiffTest LocalStore must match the retiring STQ generation")
+        assert(stq_addr(committed_stq_index).valid && stq_data(committed_stq_index).valid,
+          "DiffTest LocalStore requires captured STQ address and data")
+      }
     }
     val s_uop = WireInit(stq_uop(temp_stq_commit_head))
     when (commit_store)
