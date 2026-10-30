@@ -76,11 +76,30 @@ class DifftestLsuObservation(width: Int, dispatchWidth: Int) extends Bundle
   val queues_empty = Bool()
 }
 
-class DifftestCacheObservation(width: Int) extends Bundle
+// TL A/D are device lifecycle observations, never L1 RAM StorePublish.
+class DifftestDeviceStore(tlBeatBits: Int) extends Bundle
+{
+  val identity = new DifftestIdentity
+  val source_cycle = UInt(64.W)
+  val source_id = UInt(32.W)
+  val address = UInt(64.W)
+  val word = UInt(64.W)
+  val byte_mask = UInt(8.W)
+  val mem_size = UInt(2.W)
+  // Actual TL A payload; never infer these bits from the source STQ fields.
+  val tl_data = UInt(tlBeatBits.W)
+  val tl_mask = UInt((tlBeatBits / 8).W)
+  val denied = Bool()
+  val corrupt = Bool()
+}
+
+class DifftestCacheObservation(width: Int, mmioCount: Int, tlBeatBits: Int) extends Bundle
 {
   val load = Vec(width, Valid(new DifftestLoadSample))
   // An exclusive-cache data write is the candidate publication fact. The host
   // still needs the common clock/arbitration proof before assigning a GMO rank.
   val store_applied = Valid(new DifftestStore)
+  val mmio_request = Vec(mmioCount, Valid(new DifftestDeviceStore(tlBeatBits)))
+  val mmio_ack = Vec(mmioCount, Valid(new DifftestDeviceStore(tlBeatBits)))
   val idle = Bool()
 }

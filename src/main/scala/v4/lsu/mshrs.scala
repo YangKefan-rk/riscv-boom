@@ -428,6 +428,8 @@ class BoomIOMSHR(id: Int)(implicit edge: TLEdgeOut, p: Parameters) extends BoomM
 {
   val io = IO(new Bundle {
     val difftest_control = if (boomParams.enableDifftest) Some(Input(new DifftestControl)) else None
+    val difftest_request = if (boomParams.enableDifftest) Some(Output(Valid(new DifftestDeviceStore(edge.bundle.dataBits)))) else None
+    val difftest_ack = if (boomParams.enableDifftest) Some(Output(Valid(new DifftestDeviceStore(edge.bundle.dataBits)))) else None
     val req  = Flipped(Decoupled(new BoomDCacheReq))
     val resp = Decoupled(new BoomDCacheResp)
     val mem_access = Decoupled(new TLBundleA(edge.bundle))
@@ -502,6 +504,33 @@ class BoomIOMSHR(id: Int)(implicit edge: TLEdgeOut, p: Parameters) extends BoomM
     sample.byte_mask := new StoreGen(req.uop.mem_size, req.addr, 0.U, wordBytes).mask
   }
 
+  if (boomParams.enableDifftest) {
+    val ordinary_store = isWrite(req.uop.mem_cmd) && !isAMO(req.uop.mem_cmd)
+    val request = io.difftest_request.get
+    val ack = io.difftest_ack.get
+    request.valid := io.mem_access.fire && ordinary_store
+    ack.valid := state === s_mem_ack && io.mem_ack.valid && ordinary_store
+    for (record <- Seq(request.bits, ack.bits)) {
+      record := 0.U.asTypeOf(record)
+      record.identity := req.uop.difftest.get
+      record.source_cycle := io.difftest_control.get.cycle
+      record.source_id := a_source
+      record.address := req.addr
+      record.word := req.data
+      record.byte_mask := new StoreGen(req.uop.mem_size, req.addr, 0.U, wordBytes).mask
+      record.mem_size := req.uop.mem_size
+    }
+    request.bits.source_id := io.mem_access.bits.source
+    request.bits.address := io.mem_access.bits.address
+    request.bits.tl_data := io.mem_access.bits.data
+    request.bits.tl_mask := io.mem_access.bits.mask
+    ack.bits.source_id := io.mem_ack.bits.source
+    ack.bits.denied := io.mem_ack.bits.denied
+    ack.bits.corrupt := io.mem_ack.bits.corrupt
+    when (ack.valid) {
+      assert(io.mem_ack.bits.source === a_source, "DiffTest device ACK lost its original IOMSHR identity")
+    }
+  }
   when (io.req.fire) {
     req   := io.req.bits
     state := s_mem_access
@@ -556,6 +585,8 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
   val io = IO(new Bundle {
     val difftest_idle = if (boomParams.enableDifftest) Some(Output(Bool())) else None
     val difftest_control = if (boomParams.enableDifftest) Some(Input(new DifftestControl)) else None
+    val difftest_mmio_request = if (boomParams.enableDifftest) Some(Output(Vec(nIOMSHRs, Valid(new DifftestDeviceStore(edge.bundle.dataBits))))) else None
+    val difftest_mmio_ack = if (boomParams.enableDifftest) Some(Output(Vec(nIOMSHRs, Valid(new DifftestDeviceStore(edge.bundle.dataBits))))) else None
     val req  = Flipped(Vec(lsuWidth, Decoupled(new BoomDCacheReqInternal))) // Req from s2 of DCache pipe
     val req_is_probe = Input(Vec(lsuWidth, Bool()))
     val resp = Decoupled(new BoomDCacheResp)
@@ -753,6 +784,8 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     val mshr = Module(new BoomIOMSHR(id))
     if (boomParams.enableDifftest) {
       mshr.io.difftest_control.get := io.difftest_control.get
+      io.difftest_mmio_request.get(i) := mshr.io.difftest_request.get
+      io.difftest_mmio_ack.get(i) := mshr.io.difftest_ack.get
     }
 
     mmio_alloc_arb.io.in(i).valid := mshr.io.req.ready

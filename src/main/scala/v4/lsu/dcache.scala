@@ -435,7 +435,7 @@ class BoomNonBlockingDCache(staticIdForMetadataUseOnly: Int)(implicit p: Paramet
 
 class BoomDCacheBundle(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p) {
   val difftest_control = if (boomParams.enableDifftest) Some(Input(new DifftestControl)) else None
-  val difftest = if (boomParams.enableDifftest) Some(Output(new DifftestCacheObservation(lsuWidth))) else None
+  val difftest = if (boomParams.enableDifftest) Some(Output(new DifftestCacheObservation(lsuWidth, p(TileKey).dcache.get.nMMIOs, edge.bundle.dataBits))) else None
   val errors = new DCacheErrors
   val lsu   = Flipped(new LSUDMemIO)
 }
@@ -466,6 +466,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   if (boomParams.enableDifftest) {
     mshrs.io.difftest_control.get := io.difftest_control.get
     io.difftest.get := 0.U.asTypeOf(io.difftest.get)
+    io.difftest.get.mmio_request := mshrs.io.difftest_mmio_request.get
+    io.difftest.get.mmio_ack := mshrs.io.difftest_mmio_ack.get
   }
   mshrs.io.clear_all    := io.lsu.force_order
   mshrs.io.brupdate       := io.lsu.brupdate

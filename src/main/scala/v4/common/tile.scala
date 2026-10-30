@@ -261,7 +261,8 @@ class BoomTileModuleImp(outer: BoomTile) extends BaseTileModuleImp(outer){
   val difftest_lsu = if (outer.boomParams.core.enableDifftest) Some(IO(Output(
     new boom.v4.difftest.DifftestLsuObservation(outer.boomParams.core.lsuWidth, outer.boomParams.core.decodeWidth)))) else None
   val difftest_cache = if (outer.boomParams.core.enableDifftest) Some(IO(Output(
-    new boom.v4.difftest.DifftestCacheObservation(outer.boomParams.core.lsuWidth)))) else None
+    new boom.v4.difftest.DifftestCacheObservation(outer.boomParams.core.lsuWidth,
+      outer.boomParams.dcache.get.nMMIOs, outer.dcache.node.edges.out(0).bundle.dataBits)))) else None
   if (outer.boomParams.core.enableDifftest) {
     core.io.difftest_control.get := difftest_control.get
     difftest_core.get := core.io.difftest.get
