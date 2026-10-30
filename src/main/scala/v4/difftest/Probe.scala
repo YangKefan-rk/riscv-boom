@@ -102,4 +102,7 @@ class DifftestCoreObservation(width: Int, entries: Int) extends Bundle
   val squash = Vec(entries, Valid(new DifftestSquash))
   val trap = Valid(new DifftestTrap)
   val terminal = new DifftestTerminalObservation
+  // An unretired WFI is a quiescent terminal boundary only with a live,
+  // unique ROB owner and an active CSR WFI stall, never a fabricated retire.
+  val wfi_park = new DifftestWfiParkObservation
 }

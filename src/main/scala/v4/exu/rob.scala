@@ -46,6 +46,7 @@ class RobIo(
 {
   val difftest_squash = if (boomParams.enableDifftest) Some(Output(Vec(numRobEntries, Valid(new boom.v4.difftest.DifftestSquash)))) else None
   val difftest_trap = if (boomParams.enableDifftest) Some(Output(Valid(new boom.v4.difftest.DifftestTrap))) else None
+  val difftest_wfi_head = if (boomParams.enableDifftest) Some(Output(Valid(new MicroOp()))) else None
 
   // Decode Stage
   // (Allocate, write instruction to ROB).
@@ -238,6 +239,7 @@ class Rob(
 
   val rob_pnr_unsafe      = Wire(Vec(coreWidth, Bool())) // are the instructions at the pnr unsafe?
   val rob_head_vals       = Wire(Vec(coreWidth, Bool())) // are the instructions at the head valid?
+  val rob_live_counts     = Wire(Vec(coreWidth, UInt(log2Ceil(numRobRows + 1).W)))
   val rob_tail_vals       = Wire(Vec(coreWidth, Bool())) // are the instructions at the tail valid? (to track partial row dispatches)
   val rob_head_uses_stq   = Wire(Vec(coreWidth, Bool()))
   val rob_head_uses_ldq   = Wire(Vec(coreWidth, Bool()))
@@ -362,6 +364,7 @@ class Rob(
 
     // one bank
     val rob_val       = RegInit(VecInit(Seq.fill(numRobRows){false.B}))
+    rob_live_counts(w) := PopCount(rob_val.asUInt)
     val rob_bsy       = Reg(Vec(numRobRows, Bool()))
     val rob_unsafe    = Reg(Vec(numRobRows, Bool()))
     val rob_uop       = Reg(Vec(numRobRows, new MicroOp()))
@@ -827,6 +830,16 @@ class Rob(
 
   full       := WrapInc(rob_tail, numRobRows) === rob_head
   empty      := (rob_head === rob_tail) && (rob_head_vals.asUInt === 0.U)
+
+  if (boomParams.enableDifftest) {
+    val single_wfi_head = rob_live_counts.map(_.asUInt).reduce(_ +& _) === 1.U &&
+      rob_head_vals.asUInt.orR &&
+      io.commit.uops(PriorityEncoder(rob_head_vals.asUInt)).debug_inst === "h10500073".U &&
+      !io.commit.valids.asUInt.orR && !io.brupdate.b2.mispredict &&
+      !r_xcpt_val && (rob_state === s_normal || rob_state === s_wait_till_empty)
+    io.difftest_wfi_head.get.valid := single_wfi_head
+    io.difftest_wfi_head.get.bits := io.commit.uops(PriorityEncoder(rob_head_vals.asUInt))
+  }
 
   io.rob_head_idx := rob_head_idx
   io.rob_tail_idx := rob_tail_idx

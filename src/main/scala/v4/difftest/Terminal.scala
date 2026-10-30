@@ -21,6 +21,20 @@ class DifftestTerminalObservation extends Bundle
   val interrupt_pending = Bool()
 }
 
+/** A stalled WFI is not a retirement. This reports a physical ROB-head
+  * witness only; host checks all source and memory drains separately.
+  */
+class DifftestWfiParkObservation extends Bundle
+{
+  val valid = Bool()
+  val marker = new DifftestInstruction
+  val source_cycle = UInt(64.W)
+  val csr_wait = Bool()
+  val rob_only_entry = Bool()
+  val interrupt_pending = Bool()
+  val writeback_active = Bool()
+}
+
 class DifftestTerminalStop(width: Int) extends Module
 {
   require(width > 0)

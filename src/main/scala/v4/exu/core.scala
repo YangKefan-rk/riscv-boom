@@ -870,6 +870,16 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
       io.interrupts.nmi.map(_.rnmi).getOrElse(false.B)
     difftest_terminal_stop := terminal.io.stop_issue
     io.difftest.get.terminal := terminal.io.observation
+    val park = io.difftest.get.wfi_park
+    val parked_wfi = rob.io.difftest_wfi_head.get
+    park.marker := describe(parked_wfi.bits, false.B, 0.U)
+    park.source_cycle := io.difftest_control.get.cycle
+    park.csr_wait := csr.io.status.wfi && csr.io.csr_stall
+    park.rob_only_entry := parked_wfi.valid
+    park.interrupt_pending := terminal.io.observation.interrupt_pending
+    park.writeback_active := terminal.io.observation.writeback_active
+    park.valid := parked_wfi.valid && park.csr_wait &&
+      !park.interrupt_pending && !park.writeback_active
   }
 
   //-------------------------------------------------------------
