@@ -910,6 +910,34 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
     counterProbe.bits.address := RegNext(csr_resp.bits.addr)
     counterProbe.bits.value := MuxLookup(counterProbe.bits.address, 0.U(64.W))(csrReadbacks)
 
+    // Transfer instructions share the ordinary LSU/register result paths. A
+    // separate post-retirement status sample certifies unchanged FP exception
+    // flags and the DUT's actual FS state without admitting FP arithmetic.
+    def fpTransfer(instruction: UInt): Bool = {
+      val opcode = instruction(6, 0)
+      val function = instruction(14, 12)
+      val memory = (opcode === "h07".U || opcode === "h27".U) &&
+        (function === 2.U || function === 3.U)
+      val moveFunction = instruction(31, 25)
+      val move = opcode === "h53".U && instruction(24, 20) === 0.U && function === 0.U &&
+        (moveFunction === "h70".U || moveFunction === "h71".U ||
+         moveFunction === "h78".U || moveFunction === "h79".U)
+      val compressed = (instruction(1, 0) === 0.U || instruction(1, 0) === 2.U) &&
+        (instruction(15, 13) === 1.U || instruction(15, 13) === 5.U)
+      Mux(instruction(1, 0) === 3.U, memory || move, compressed)
+    }
+    for (w <- 0 until coreWidth) {
+      val retirement = io.difftest.get.retire(w)
+      val post = io.difftest.get.fp_post(w)
+      post.valid := RegNext(retirement.valid && retirement.bits.architectural &&
+        fpTransfer(retirement.bits.instruction), false.B)
+      post.bits.identity := RegNext(retirement.bits.identity)
+      post.bits.source_cycle := RegNext(io.difftest_control.get.cycle)
+      post.bits.pc := RegNext(retirement.bits.pc)
+      post.bits.fcsr := MuxLookup(CSRs.fcsr.U, 0.U(64.W))(csrReadbacks)
+      post.bits.mstatus := MuxLookup(CSRs.mstatus.U, 0.U(64.W))(csrReadbacks)
+    }
+
     val terminal = Module(new boom.v4.difftest.DifftestTerminalStop(coreWidth))
     terminal.io.armed := PlusArg("difftest_s_boom_terminal_enable", default=0, width=1,
       docstring="Arm the native FENCE.I terminal policy; default disabled").asBool

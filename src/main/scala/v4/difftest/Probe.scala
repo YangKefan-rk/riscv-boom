@@ -105,6 +105,16 @@ class DifftestCsrPostObservation extends Bundle {
   val value = UInt(64.W)
 }
 
+// Architectural FP status after a transfer retires. Its register result is
+// carried by the ordinary retirement record in canonical IEEE representation.
+class DifftestFpPostObservation extends Bundle {
+  val identity = new DifftestIdentity
+  val source_cycle = UInt(64.W)
+  val pc = UInt(64.W)
+  val fcsr = UInt(64.W)
+  val mstatus = UInt(64.W)
+}
+
 class DifftestCoreObservation(width: Int, entries: Int) extends Bundle
 {
   val hartid = UInt(64.W)
@@ -119,4 +129,5 @@ class DifftestCoreObservation(width: Int, entries: Int) extends Bundle
   val csr_post = Valid(new DifftestCsrPostObservation)
   // Captured immediately after an accepted CSR write, then matched by UID at retirement.
   val csr_write_post = Valid(new DifftestCsrPostObservation)
+  val fp_post = Vec(width, Valid(new DifftestFpPostObservation))
 }
