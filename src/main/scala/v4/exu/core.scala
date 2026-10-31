@@ -861,7 +861,7 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
     // Stable CSR poststate is sampled after retirement. Counters are sampled
     // immediately after the accepted write instead: they can advance while the
     // CSR uop is still waiting in the ROB, so retirement-time peeks miscompare.
-    val stableCsrAddresses = Seq(CSRs.fcsr, CSRs.stvec, CSRs.sscratch,
+    val stableCsrAddresses = Seq(CSRs.fcsr, CSRs.stvec, CSRs.sscratch, CSRs.sepc,
       CSRs.scause, CSRs.stval, CSRs.mstatus, CSRs.medeleg, CSRs.mideleg,
       CSRs.mie, CSRs.mtvec, CSRs.mscratch, CSRs.mepc, CSRs.mcause, CSRs.mtval,
       CSRs.pmpcfg0, CSRs.pmpaddr0).filter(csr.read_mapping.contains)
