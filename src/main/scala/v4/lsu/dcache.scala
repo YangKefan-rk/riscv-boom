@@ -160,6 +160,8 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
     val lsu_release = Decoupled(new TLBundleC(edge.bundle))
 
     val state = Output(Valid(UInt(coreMaxAddrBits.W)))
+    // These probe stages cannot change permissions or acknowledge a probe.
+    val before_permission_change = Output(Bool())
   })
 
   val (s_invalid :: s_meta_read :: s_meta_resp :: s_mshr_req ::
@@ -180,6 +182,7 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
 
   io.state.valid := state =/= s_invalid
   io.state.bits  := req.address
+  io.before_permission_change := state.isOneOf(s_meta_read, s_meta_resp, s_mshr_req)
 
   io.req.ready := state === s_invalid
   io.rep.valid := state === s_release
@@ -927,11 +930,22 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val atomic_hit_permission = s2_type === t_lsu && s2_has_permission(0) &&
     !mshrs.io.block_hit(0) && s2_hit_state(0) === s2_new_hit_state(0)
   val atomic_replay_permission = s2_type === t_replay
+  // Other-set probes cannot alter this way. An MSHR replay may also finish
+  // before a same-set probe passes its metadata/permission decision: the MSHR
+  // blocks its probe request until the replay is drained. Keep incoming and
+  // later-stage same-set probes unqualified.
+  def atomic_probe_conflicts(address: UInt, replay: Bool): Bool = {
+    val index = address(idxMSB, idxLSB)
+    val active = prober.io.state.valid && prober.io.state.bits(idxMSB, idxLSB) === index &&
+      !(replay && prober.io.before_permission_change)
+    active || (tl_out.b.valid && tl_out.b.bits.address(idxMSB, idxLSB) === index)
+  }
+  val atomic_replay_s3 = RegNext(atomic_replay_permission, false.B)
   val atomic_exclusive_s3 = RegNext(
     s2_valid(0) && s2_req(0).uop.is_amo && s2_req(0).uop.is_unique &&
     (s2_req(0).uop.rob_idx === io.lsu.rob_head_idx) && s2_tag_match(0) &&
     (atomic_hit_permission || atomic_replay_permission) && !s2_nack(0) &&
-    !prober.io.state.valid && !tl_out.b.valid, false.B)
+    !atomic_probe_conflicts(s2_req(0).addr, atomic_replay_permission), false.B)
   for (w <- 1 until lsuWidth) {
     assert(!(s2_valid(w) && s2_hit(w) && isWrite(s2_req(w).uop.mem_cmd) &&
                          !s2_sc_fail && !(s2_send_nack(w) && s2_nack(w))),
@@ -1029,7 +1043,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     atomic.bits.mem_size := s3_req.uop.mem_size
     atomic.bits.command := s3_req.uop.mem_cmd
     atomic.bits.exclusive_valid := atomic_exclusive_s3 &&
-      !prober.io.state.valid && !tl_out.b.valid
+      !atomic_probe_conflicts(s3_req.addr, atomic_replay_s3)
     when (atomic.valid) {
       assert(s3_req.uop.uses_stq && atomic.bits.identity.uid =/= 0.U,
         "DiffTest AMO publication needs a live STQ and stable instruction identity")
