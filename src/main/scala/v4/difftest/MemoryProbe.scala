@@ -59,6 +59,24 @@ class DifftestStore extends Bundle
   val command = UInt(5.W)
 }
 
+/** One physically accepted RMW on an exclusive cache line. Both words share the
+  * exclusive data-array write witness; they are not separate GMO events.
+  */
+class DifftestAtomicApplied extends Bundle {
+  val identity = new DifftestIdentity
+  val source_cycle = UInt(64.W)
+  val address = UInt(64.W)
+  val old_word = UInt(64.W)
+  val new_word = UInt(64.W)
+  val byte_mask = UInt(8.W)
+  val queue_index = UInt(32.W)
+  val mem_size = UInt(2.W)
+  val command = UInt(5.W)
+  // True only when the source observed an exclusive hit with no concurrent
+  // probe/block hazard. False means the host must return Incomplete.
+  val exclusive_valid = Bool()
+}
+
 class DifftestLsuObservation(width: Int, dispatchWidth: Int) extends Bundle
 {
   val allocate = Vec(dispatchWidth, Valid(new DifftestQueueAllocation))
@@ -99,6 +117,7 @@ class DifftestCacheObservation(width: Int, mmioCount: Int, tlBeatBits: Int) exte
   // An exclusive-cache data write is the candidate publication fact. The host
   // still needs the common clock/arbitration proof before assigning a GMO rank.
   val store_applied = Valid(new DifftestStore)
+  val atomic_applied = Valid(new DifftestAtomicApplied)
   val mmio_request = Vec(mmioCount, Valid(new DifftestDeviceStore(tlBeatBits)))
   val mmio_ack = Vec(mmioCount, Valid(new DifftestDeviceStore(tlBeatBits)))
   val idle = Bool()

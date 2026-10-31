@@ -919,6 +919,19 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val s3_valid = RegNext(s2_valid(0) && s2_hit(0) && isWrite(s2_req(0).uop.mem_cmd) &&
                          !s2_sc_fail && !(s2_send_nack(0) && s2_nack(0)))
   val s3_data_word = RegNext(s2_data_word(0))
+  // The s3 word is precisely the value fed to AMOALU, including an older
+  // same-word store bypass. On a normal hit the metadata proves exclusive
+  // permission. An MSHR replay occurs after its grant and refill, but before
+  // its metadata write; the MSHR asserts write permission at replay.fire.
+  // Hence the stale metadata and its own block_hit cannot certify a replay.
+  val atomic_hit_permission = s2_type === t_lsu && s2_has_permission(0) &&
+    !mshrs.io.block_hit(0) && s2_hit_state(0) === s2_new_hit_state(0)
+  val atomic_replay_permission = s2_type === t_replay
+  val atomic_exclusive_s3 = RegNext(
+    s2_valid(0) && s2_req(0).uop.is_amo && s2_req(0).uop.is_unique &&
+    (s2_req(0).uop.rob_idx === io.lsu.rob_head_idx) && s2_tag_match(0) &&
+    (atomic_hit_permission || atomic_replay_permission) && !s2_nack(0) &&
+    !prober.io.state.valid && !tl_out.b.valid, false.B)
   for (w <- 1 until lsuWidth) {
     assert(!(s2_valid(w) && s2_hit(w) && isWrite(s2_req(w).uop.mem_cmd) &&
                          !s2_sc_fail && !(s2_send_nack(w) && s2_nack(w))),
@@ -998,6 +1011,29 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     record.bits.byte_mask := new StoreGen(s3_req.uop.mem_size, s3_req.addr, 0.U, wordBytes).mask
     record.bits.atomic := s3_req.uop.is_amo
     record.bits.command := s3_req.uop.mem_cmd
+    val atomic = io.difftest.get.atomic_applied
+    val raw_atomic = s3_req.uop.debug_inst
+    // LR has no cache write; SC's reservation/success is a separate contract.
+    // Only RMW W/D reaches this narrow indivisible-write witness.
+    val rmw = raw_atomic(6, 0) === "h2f".U &&
+      (raw_atomic(14, 12) === 2.U || raw_atomic(14, 12) === 3.U) &&
+      raw_atomic(31, 27) =/= 2.U && raw_atomic(31, 27) =/= 3.U
+    atomic.valid := record.valid && s3_req.uop.is_amo && rmw
+    atomic.bits.identity := s3_req.uop.difftest.get
+    atomic.bits.source_cycle := io.difftest_control.get.cycle
+    atomic.bits.address := s3_req.addr
+    atomic.bits.old_word := s3_data_word.pad(64)
+    atomic.bits.new_word := s3_req.data.pad(64)
+    atomic.bits.byte_mask := record.bits.byte_mask
+    atomic.bits.queue_index := record.bits.queue_index
+    atomic.bits.mem_size := s3_req.uop.mem_size
+    atomic.bits.command := s3_req.uop.mem_cmd
+    atomic.bits.exclusive_valid := atomic_exclusive_s3 &&
+      !prober.io.state.valid && !tl_out.b.valid
+    when (atomic.valid) {
+      assert(s3_req.uop.uses_stq && atomic.bits.identity.uid =/= 0.U,
+        "DiffTest AMO publication needs a live STQ and stable instruction identity")
+    }
     // Include pipeline and TileLink channel transfers: the functional `ordered`
     // output only counts S1/S2, while an incoming probe becomes visible in the
     // prober state one cycle after its B-channel handshake.
