@@ -94,6 +94,17 @@ class DifftestTrap extends Bundle
   val cause = UInt(64.W)
 }
 
+// Carries the physical CSRFile value one edge after either a stable CSR
+// retirement or an accepted counter write. The owner UID is explicit;
+// unknown CSRs receive no comparison certificate.
+class DifftestCsrPostObservation extends Bundle {
+  val identity = new DifftestIdentity
+  val source_cycle = UInt(64.W)
+  val pc = UInt(64.W)
+  val address = UInt(12.W)
+  val value = UInt(64.W)
+}
+
 class DifftestCoreObservation(width: Int, entries: Int) extends Bundle
 {
   val hartid = UInt(64.W)
@@ -105,4 +116,7 @@ class DifftestCoreObservation(width: Int, entries: Int) extends Bundle
   // An unretired WFI is a quiescent terminal boundary only with a live,
   // unique ROB owner and an active CSR WFI stall, never a fabricated retire.
   val wfi_park = new DifftestWfiParkObservation
+  val csr_post = Valid(new DifftestCsrPostObservation)
+  // Captured immediately after an accepted CSR write, then matched by UID at retirement.
+  val csr_write_post = Valid(new DifftestCsrPostObservation)
 }

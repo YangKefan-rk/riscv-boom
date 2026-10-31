@@ -32,6 +32,7 @@ import java.nio.file.{Paths}
 
 import chisel3._
 import chisel3.util._
+import chisel3.util.experimental.BoringUtils
 
 import org.chipsalliance.cde.config.Parameters
 import freechips.rocketchip.rocket.Instructions._
@@ -856,6 +857,58 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
     io.difftest.get.squash.foreach(_.bits.source_cycle := io.difftest_control.get.cycle)
     io.difftest.get.trap := rob.io.difftest_trap.get
     io.difftest.get.trap.bits.source_cycle := io.difftest_control.get.cycle
+
+    // Stable CSR poststate is sampled after retirement. Counters are sampled
+    // immediately after the accepted write instead: they can advance while the
+    // CSR uop is still waiting in the ROB, so retirement-time peeks miscompare.
+    val stableCsrAddresses = Seq(CSRs.fcsr, CSRs.stvec, CSRs.sscratch,
+      CSRs.scause, CSRs.stval, CSRs.mstatus, CSRs.medeleg, CSRs.mideleg,
+      CSRs.mie, CSRs.mtvec, CSRs.mscratch, CSRs.mcause, CSRs.mtval,
+      CSRs.pmpcfg0, CSRs.pmpaddr0).filter(csr.read_mapping.contains)
+    val counterCsrAddresses = Seq(CSRs.mcycle, CSRs.minstret).filter(csr.read_mapping.contains)
+    val csrReadbacks = (stableCsrAddresses ++ counterCsrAddresses).map { address =>
+      address.U -> BoringUtils.bore(csr.read_mapping(address)).asUInt.pad(64)
+    }
+    val csr_commit = io.difftest.get.retire.map { retirement =>
+      val instruction = retirement.bits.instruction
+      val address = instruction(31, 20)
+      retirement.valid && retirement.bits.architectural &&
+      instruction(6, 0) === "h73".U && instruction(14, 12) =/= 0.U &&
+      stableCsrAddresses.map(csr => address === csr.U).reduce(_ || _)
+    }
+    assert(PopCount(VecInit(csr_commit)) <= 1.U,
+      "Difftest CSR state probe cannot associate two simultaneous CSR retirements")
+    val csr_probe = io.difftest.get.csr_post
+    csr_probe.valid := RegNext(VecInit(csr_commit).asUInt.orR, false.B)
+    csr_probe.bits.identity := RegNext(Mux1H(csr_commit, io.difftest.get.retire.map(_.bits.identity)))
+    csr_probe.bits.source_cycle := RegNext(io.difftest_control.get.cycle)
+    csr_probe.bits.pc := RegNext(Mux1H(csr_commit, io.difftest.get.retire.map(_.bits.pc)))
+    csr_probe.bits.address := RegNext(Mux1H(csr_commit,
+      io.difftest.get.retire.map(_.bits.instruction(31, 20))))
+    csr_probe.bits.value := MuxLookup(csr_probe.bits.address, 0.U(64.W))(csrReadbacks)
+
+    // Only writes without an architectural read result are certified here.
+    // Later CSRRS/CSRRC and reads of free-running counters need a separate
+    // reference-time policy, even if they happen to name the same CSR address.
+    val counterInstruction = csr_resp.bits.uop.debug_inst
+    val counterWrite = csr_resp.valid && !csr.io.rw_stall && csr.io.rw.cmd === CSR.W &&
+      counterInstruction(6, 0) === "h73".U &&
+      (counterInstruction(14, 12) === 1.U || counterInstruction(14, 12) === 5.U) &&
+      counterInstruction(11, 7) === 0.U &&
+      counterCsrAddresses.foldLeft(false.B) { (found, address) =>
+        found || csr_resp.bits.addr === address.U
+      }
+    when (counterWrite) {
+      assert(csr_resp.bits.addr === counterInstruction(31, 20),
+        "Difftest counter CSR write and executing instruction disagree on address")
+    }
+    val counterProbe = io.difftest.get.csr_write_post
+    counterProbe.valid := RegNext(counterWrite, false.B)
+    counterProbe.bits.identity := RegNext(csr_resp.bits.uop.difftest.get)
+    counterProbe.bits.source_cycle := RegNext(io.difftest_control.get.cycle)
+    counterProbe.bits.pc := RegNext(Sext(csr_resp.bits.uop.debug_pc, 64))
+    counterProbe.bits.address := RegNext(csr_resp.bits.addr)
+    counterProbe.bits.value := MuxLookup(counterProbe.bits.address, 0.U(64.W))(csrReadbacks)
 
     val terminal = Module(new boom.v4.difftest.DifftestTerminalStop(coreWidth))
     terminal.io.armed := PlusArg("difftest_s_boom_terminal_enable", default=0, width=1,
