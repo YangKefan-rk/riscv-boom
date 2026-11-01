@@ -930,22 +930,24 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val atomic_hit_permission = s2_type === t_lsu && s2_has_permission(0) &&
     !mshrs.io.block_hit(0) && s2_hit_state(0) === s2_new_hit_state(0)
   val atomic_replay_permission = s2_type === t_replay
-  // Other-set probes cannot alter this way. An MSHR replay may also finish
-  // before a same-set probe passes its metadata/permission decision: the MSHR
-  // blocks its probe request until the replay is drained. Keep incoming and
-  // later-stage same-set probes unqualified.
-  def atomic_probe_conflicts(address: UInt, replay: Bool): Bool = {
-    val index = address(idxMSB, idxLSB)
-    val active = prober.io.state.valid && prober.io.state.bits(idxMSB, idxLSB) === index &&
-      !(replay && prober.io.before_permission_change)
-    active || (tl_out.b.valid && tl_out.b.bits.address(idxMSB, idxLSB) === index)
+  // Only a Probe that has reached permission-changing stages can race a
+  // certified hit/replay. An early same-set Probe has not changed metadata or
+  // read writeback data; normal hits are eligible only when onAccess leaves
+  // their metadata state unchanged. A B-channel request arriving after S2
+  // cannot reach either stage before the physical S3 data-array write.
+  def active_atomic_probe_conflict(address: UInt, before_change_safe: Bool): Bool = {
+    prober.io.state.valid && prober.io.state.bits(idxMSB, idxLSB) === address(idxMSB, idxLSB) &&
+      !(before_change_safe && prober.io.before_permission_change)
   }
-  val atomic_replay_s3 = RegNext(atomic_replay_permission, false.B)
+  def incoming_atomic_probe_conflict(address: UInt): Bool = {
+    tl_out.b.valid && tl_out.b.bits.address(idxMSB, idxLSB) === address(idxMSB, idxLSB)
+  }
   val atomic_exclusive_s3 = RegNext(
     s2_valid(0) && s2_req(0).uop.is_amo && s2_req(0).uop.is_unique &&
     (s2_req(0).uop.rob_idx === io.lsu.rob_head_idx) && s2_tag_match(0) &&
     (atomic_hit_permission || atomic_replay_permission) && !s2_nack(0) &&
-    !atomic_probe_conflicts(s2_req(0).addr, atomic_replay_permission), false.B)
+    !active_atomic_probe_conflict(s2_req(0).addr, atomic_hit_permission || atomic_replay_permission) &&
+    !incoming_atomic_probe_conflict(s2_req(0).addr), false.B)
   for (w <- 1 until lsuWidth) {
     assert(!(s2_valid(w) && s2_hit(w) && isWrite(s2_req(w).uop.mem_cmd) &&
                          !s2_sc_fail && !(s2_send_nack(w) && s2_nack(w))),
@@ -1042,8 +1044,11 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     atomic.bits.queue_index := record.bits.queue_index
     atomic.bits.mem_size := s3_req.uop.mem_size
     atomic.bits.command := s3_req.uop.mem_cmd
+    // Once S2 is certified, a newly offered B-channel Probe cannot reach its
+    // first metadata read until after this S3 data write. An already active
+    // same-set Probe still blocks us if it passed its pre-change stages.
     atomic.bits.exclusive_valid := atomic_exclusive_s3 &&
-      !atomic_probe_conflicts(s3_req.addr, atomic_replay_s3)
+      !active_atomic_probe_conflict(s3_req.addr, true.B)
     when (atomic.valid) {
       assert(s3_req.uop.uses_stq && atomic.bits.identity.uid =/= 0.U,
         "DiffTest AMO publication needs a live STQ and stable instruction identity")
