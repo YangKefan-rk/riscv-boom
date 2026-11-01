@@ -855,7 +855,65 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
     }
     io.difftest.get.squash := rob.io.difftest_squash.get
     io.difftest.get.squash.foreach(_.bits.source_cycle := io.difftest_control.get.cycle)
+    // ECALL/EBREAK enter CSRFile through the unique CSR execution response,
+    // then retire and redirect through the ROB's eret flush path. They do not
+    // raise rob.io.com_xcpt, so the ordinary ROB exception probe misses them.
+    // Keep the physical CSR response's owner, PC, cause and ROB generation
+    // until that exact architectural retirement is observed.
+    val systemInsn = csr_resp.bits.uop.debug_inst
+    val physicalSystemTrap = csr_resp.valid && !csr.io.rw_stall && csr.io.eret &&
+      csr.io.rw.cmd === CSR.I && csr_resp.bits.uop.is_sys_pc2epc &&
+      (systemInsn === "h00000073".U || systemInsn === "h00100073".U)
+    val physicalSystemIdentity = Reg(new boom.v4.difftest.DifftestIdentity)
+    val physicalSystemPc = Reg(UInt(64.W))
+    val physicalSystemCause = Reg(UInt(64.W))
+    val physicalSystemDebug = Reg(Bool())
+    val physicalSystemPending = RegInit(false.B)
+    val currentSystemCause = Mux(systemInsn === "h00100073".U, 3.U(64.W),
+      MuxLookup(csr.io.status.prv, 0.U(64.W))(Seq(
+        0.U -> 8.U(64.W), 1.U -> 9.U(64.W), 3.U -> 11.U(64.W))))
+    val systemRetire = (0 until coreWidth).map { w =>
+      val owner = rob.io.commit.uops(w)
+      rob.io.commit.arch_valids(w) && owner.is_sys_pc2epc &&
+        (owner.debug_inst === "h00000073".U || owner.debug_inst === "h00100073".U)
+    }
+    assert(PopCount(VecInit(systemRetire)) <= 1.U,
+      "DiffTest system trap has multiple architectural ROB owners")
+    val systemRetireValid = VecInit(systemRetire).asUInt.orR
+    val systemRetireOwner = Mux1H(systemRetire, io.difftest.get.retire.map(_.bits))
+    val systemTrapIdentity = Mux(physicalSystemPending, physicalSystemIdentity,
+      csr_resp.bits.uop.difftest.get)
+    val systemTrapPc = Mux(physicalSystemPending, physicalSystemPc,
+      Sext(csr_resp.bits.uop.debug_pc, 64))
+    val systemTrapCause = Mux(physicalSystemPending, physicalSystemCause, currentSystemCause)
+    val systemTrapDebug = Mux(physicalSystemPending, physicalSystemDebug, csr.io.status.debug)
+    when (physicalSystemTrap) {
+      assert(!physicalSystemPending,
+        "DiffTest CSRFile system exception repeated before its ROB commit")
+      physicalSystemPending := true.B
+      physicalSystemIdentity := csr_resp.bits.uop.difftest.get
+      physicalSystemPc := Sext(csr_resp.bits.uop.debug_pc, 64)
+      physicalSystemCause := currentSystemCause
+      physicalSystemDebug := csr.io.status.debug
+    }
+    when (systemRetireValid) {
+      assert((physicalSystemPending || physicalSystemTrap) &&
+        systemRetireOwner.identity.asUInt === systemTrapIdentity.asUInt &&
+        systemRetireOwner.pc === systemTrapPc &&
+        rob.io.flush.valid && rob.io.flush.bits.flush_typ === FlushTypes.eret &&
+        !systemTrapDebug,
+        "DiffTest ECALL/EBREAK lacks exact physical CSRFile/ROB/eret owner")
+      physicalSystemPending := false.B
+    }
+    assert(!(rob.io.difftest_trap.get.valid && systemRetireValid),
+      "DiffTest ROB exception and system trap overlapped")
     io.difftest.get.trap := rob.io.difftest_trap.get
+    when (systemRetireValid) {
+      io.difftest.get.trap.valid := true.B
+      io.difftest.get.trap.bits.identity := systemTrapIdentity
+      io.difftest.get.trap.bits.pc := systemTrapPc
+      io.difftest.get.trap.bits.cause := systemTrapCause
+    }
     io.difftest.get.trap.bits.source_cycle := io.difftest_control.get.cycle
 
     // Stable CSR poststate is sampled after retirement. Counters are sampled
@@ -868,6 +926,32 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
     val counterCsrAddresses = Seq(CSRs.mcycle, CSRs.minstret).filter(csr.read_mapping.contains)
     val csrReadbacks = (stableCsrAddresses ++ counterCsrAddresses).map { address =>
       address.U -> BoringUtils.bore(csr.read_mapping(address)).asUInt.pad(64)
+    }
+    // rob.io.com_xcpt is asserted at N; the CSRFile receives the registered
+    // exception at N+1 and updates architectural CSRs on that edge. The
+    // N+2 probe must refer back to the original trap, never a younger flush.
+    val trapPost = io.difftest.get.trap_post
+    val trapped = io.difftest.get.trap
+    trapPost.valid := RegNext(RegNext(trapped.valid, false.B), false.B)
+    trapPost.bits.identity := RegNext(RegNext(trapped.bits.identity))
+    trapPost.bits.source_cycle := RegNext(RegNext(trapped.bits.source_cycle))
+    trapPost.bits.pc := RegNext(RegNext(trapped.bits.pc))
+    trapPost.bits.cause := RegNext(RegNext(trapped.bits.cause))
+    trapPost.bits.target_pc := RegNext(io.ifu.redirect_pc)
+    trapPost.bits.privilege := csr.io.status.prv
+    def trapCsr(address: Int): UInt = MuxLookup(address.U, 0.U(64.W))(csrReadbacks)
+    trapPost.bits.mstatus := trapCsr(CSRs.mstatus)
+    trapPost.bits.mepc := trapCsr(CSRs.mepc)
+    trapPost.bits.mcause := trapCsr(CSRs.mcause)
+    trapPost.bits.mtval := trapCsr(CSRs.mtval)
+    trapPost.bits.sepc := trapCsr(CSRs.sepc)
+    trapPost.bits.scause := trapCsr(CSRs.scause)
+    trapPost.bits.stval := trapCsr(CSRs.stval)
+    when (trapPost.valid) {
+      assert(RegNext(io.ifu.redirect_val),
+        "DiffTest trap post-state requires the physical redirect edge")
+      assert(!csr.io.status.debug,
+        "DiffTest normal trap profile cannot certify a CSRFile debug exception")
     }
     val csr_commit = io.difftest.get.retire.map { retirement =>
       val instruction = retirement.bits.instruction
