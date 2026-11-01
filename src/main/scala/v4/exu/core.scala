@@ -927,6 +927,34 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
     val csrReadbacks = (stableCsrAddresses ++ counterCsrAddresses).map { address =>
       address.U -> BoringUtils.bore(csr.read_mapping(address)).asUInt.pad(64)
     }
+    // Snapshot the physical bank in the same cycle as allocate: the newly
+    // dispatched instruction cannot change a CSR before this dispatch edge.
+    // Require all M/S trap fields at elaboration instead of inventing values
+    // for unavailable physical CSRFile registers.
+    def requiredDispatchCsr(address: Int): UInt = {
+      require(csr.read_mapping.contains(address),
+        s"DiffTest dispatch CSR ${address.toHexString} has no physical CSRFile readback")
+      BoringUtils.bore(csr.read_mapping(address)).asUInt.pad(64)
+    }
+    val dispatchCsr = io.difftest.get.dispatch_csr
+    dispatchCsr.valid := dis_fire.asUInt.orR
+    dispatchCsr.bits.source_cycle := io.difftest_control.get.cycle
+    // A clean pre-enqueue ROB and no delayed/active CSRFile side effect prove
+    // that an older boot instruction cannot change this sampled trap bank.
+    // Export the evidence even when false; the checked host rejects the
+    // uncertain entry instead of treating an early snapshot as initialized.
+    dispatchCsr.bits.older_drained := rob.io.empty && !csr_resp.valid &&
+      !csr.io.exception && !rob.io.com_xcpt.valid && !rob.io.flush.valid &&
+      !physicalSystemPending && !rob.io.commit.fflags.valid &&
+      !csr.io.status.debug
+    dispatchCsr.bits.privilege := csr.io.status.prv
+    dispatchCsr.bits.mstatus := requiredDispatchCsr(CSRs.mstatus)
+    dispatchCsr.bits.mepc := requiredDispatchCsr(CSRs.mepc)
+    dispatchCsr.bits.mcause := requiredDispatchCsr(CSRs.mcause)
+    dispatchCsr.bits.mtval := requiredDispatchCsr(CSRs.mtval)
+    dispatchCsr.bits.sepc := requiredDispatchCsr(CSRs.sepc)
+    dispatchCsr.bits.scause := requiredDispatchCsr(CSRs.scause)
+    dispatchCsr.bits.stval := requiredDispatchCsr(CSRs.stval)
     // rob.io.com_xcpt is asserted at N; the CSRFile receives the registered
     // exception at N+1 and updates architectural CSRs on that edge. The
     // N+2 probe must refer back to the original trap, never a younger flush.
