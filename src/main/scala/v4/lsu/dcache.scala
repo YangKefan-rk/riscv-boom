@@ -939,15 +939,15 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     prober.io.state.valid && prober.io.state.bits(idxMSB, idxLSB) === address(idxMSB, idxLSB) &&
       !(before_change_safe && prober.io.before_permission_change)
   }
-  def incoming_atomic_probe_conflict(address: UInt): Bool = {
-    tl_out.b.valid && tl_out.b.bits.address(idxMSB, idxLSB) === address(idxMSB, idxLSB)
-  }
+  // An incoming B-channel Probe cannot reach a permission-changing stage
+  // before the immediately following S3 data-array write. Recheck the
+  // registered active Probe at S3; a pre-existing late same-set Probe remains
+  // disqualifying, including one that advances out of an early stage at S3.
   val atomic_exclusive_s3 = RegNext(
     s2_valid(0) && s2_req(0).uop.is_amo && s2_req(0).uop.is_unique &&
     (s2_req(0).uop.rob_idx === io.lsu.rob_head_idx) && s2_tag_match(0) &&
     (atomic_hit_permission || atomic_replay_permission) && !s2_nack(0) &&
-    !active_atomic_probe_conflict(s2_req(0).addr, atomic_hit_permission || atomic_replay_permission) &&
-    !incoming_atomic_probe_conflict(s2_req(0).addr), false.B)
+    !active_atomic_probe_conflict(s2_req(0).addr, atomic_hit_permission || atomic_replay_permission), false.B)
   for (w <- 1 until lsuWidth) {
     assert(!(s2_valid(w) && s2_hit(w) && isWrite(s2_req(w).uop.mem_cmd) &&
                          !s2_sc_fail && !(s2_send_nack(w) && s2_nack(w))),
