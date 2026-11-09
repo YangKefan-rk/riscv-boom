@@ -78,6 +78,21 @@ class DifftestInstruction extends Bundle
   val write_data = UInt(64.W)
 }
 
+// Physical CSRFile state on the dispatch edge. The simultaneous allocate
+// lanes carry the instruction identities and PCs; one CSR bank serves them all.
+class DifftestDispatchCsr extends Bundle {
+  val source_cycle = UInt(64.W)
+  val older_drained = Bool()
+  val privilege = UInt(2.W)
+  val mstatus = UInt(64.W)
+  val mepc = UInt(64.W)
+  val mcause = UInt(64.W)
+  val mtval = UInt(64.W)
+  val sepc = UInt(64.W)
+  val scause = UInt(64.W)
+  val stval = UInt(64.W)
+}
+
 class DifftestSquash extends Bundle
 {
   val identity = new DifftestIdentity
@@ -92,6 +107,24 @@ class DifftestTrap extends Bundle
   val source_cycle = UInt(64.W)
   val pc = UInt(64.W)
   val cause = UInt(64.W)
+}
+
+// CSRFile consumes a ROB trap one cycle later. Capture its resulting state
+// after that edge, preserving the original trap UID and source cycle.
+class DifftestTrapPostObservation extends Bundle {
+  val identity = new DifftestIdentity
+  val source_cycle = UInt(64.W)
+  val pc = UInt(64.W)
+  val cause = UInt(64.W)
+  val target_pc = UInt(64.W)
+  val privilege = UInt(2.W)
+  val mstatus = UInt(64.W)
+  val mepc = UInt(64.W)
+  val mcause = UInt(64.W)
+  val mtval = UInt(64.W)
+  val sepc = UInt(64.W)
+  val scause = UInt(64.W)
+  val stval = UInt(64.W)
 }
 
 // Carries the physical CSRFile value one edge after either a stable CSR
@@ -119,9 +152,11 @@ class DifftestCoreObservation(width: Int, entries: Int) extends Bundle
 {
   val hartid = UInt(64.W)
   val allocate = Vec(width, Valid(new DifftestInstruction))
+  val dispatch_csr = Valid(new DifftestDispatchCsr)
   val retire = Vec(width, Valid(new DifftestInstruction))
   val squash = Vec(entries, Valid(new DifftestSquash))
   val trap = Valid(new DifftestTrap)
+  val trap_post = Valid(new DifftestTrapPostObservation)
   val terminal = new DifftestTerminalObservation
   // An unretired WFI is a quiescent terminal boundary only with a live,
   // unique ROB owner and an active CSR WFI stall, never a fabricated retire.
