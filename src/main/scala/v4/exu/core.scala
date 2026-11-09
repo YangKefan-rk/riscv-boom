@@ -910,6 +910,19 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
     counterProbe.bits.address := RegNext(csr_resp.bits.addr)
     counterProbe.bits.value := MuxLookup(counterProbe.bits.address, 0.U(64.W))(csrReadbacks)
 
+    val counterRead = csr_resp.valid && !csr.io.rw_stall &&
+      !IsKilledByBranch(brupdate, RegNext(rob.io.flush.valid), csr_resp.bits.uop) &&
+      counterInstruction(6, 0) === "h73".U && counterInstruction(14, 12) === 2.U &&
+      counterInstruction(19, 15) === 0.U && counterInstruction(11, 7) =/= 0.U &&
+      csr_resp.bits.addr === CSRs.mcycle.U
+    val counterReadProbe = io.difftest.get.counter_read
+    counterReadProbe.valid := RegNext(counterRead, false.B)
+    counterReadProbe.bits.identity := RegNext(csr_resp.bits.uop.difftest.get)
+    counterReadProbe.bits.source_cycle := RegNext(io.difftest_control.get.cycle)
+    counterReadProbe.bits.pc := RegNext(Sext(csr_resp.bits.uop.debug_pc, 64))
+    counterReadProbe.bits.address := RegNext(csr_resp.bits.addr)
+    counterReadProbe.bits.value := RegNext(MuxLookup(csr_resp.bits.addr, 0.U(64.W))(csrReadbacks))
+
     // Transfer instructions share the ordinary LSU/register result paths. A
     // separate post-retirement status sample certifies unchanged FP exception
     // flags and the DUT's actual FS state without admitting FP arithmetic.

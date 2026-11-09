@@ -129,5 +129,7 @@ class DifftestCoreObservation(width: Int, entries: Int) extends Bundle
   val csr_post = Valid(new DifftestCsrPostObservation)
   // Captured immediately after an accepted CSR write, then matched by UID at retirement.
   val csr_write_post = Valid(new DifftestCsrPostObservation)
+  // Counter environment sampled at execution, before register writeback.
+  val counter_read = Valid(new DifftestCsrPostObservation)
   val fp_post = Vec(width, Valid(new DifftestFpPostObservation))
 }
