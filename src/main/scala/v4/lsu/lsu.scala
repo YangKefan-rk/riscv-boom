@@ -1617,7 +1617,11 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
     if (boomParams.enableDifftest) {
       val previous = difftest_wb_attempt.get(w)
-      val cache_survives = RegNext(dmem_req_fire(w) && !s0_kills(w)) && !io.dmem.s1_kill(w)
+      // Translation-only loads can share this lane with a fast store commit.
+      // The store's cache request must not keep the load attempt alive.
+      val cache_load_fired = dmem_req_fire(w) && !s0_kills(w) &&
+        (will_fire_load_agen_exec(w) || will_fire_load_retry(w) || will_fire_load_wakeup(w))
+      val cache_survives = RegNext(cache_load_fired) && !io.dmem.s1_kill(w)
       // Wait for the real WB forwarding decision. A speculative S1 candidate
       // is insufficient: it may lose to another response, or become valid only
       // after the registered CAM matches have reached the forwarding stage.
