@@ -938,7 +938,10 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     val index = address(idxMSB, idxLSB)
     val active = prober.io.state.valid && prober.io.state.bits(idxMSB, idxLSB) === index &&
       !(replay && prober.io.before_permission_change)
-    active || (tl_out.b.valid && tl_out.b.bits.address(idxMSB, idxLSB) === index)
+    // An incoming B for a different block cannot revoke this block's permission.
+    // Keep the conservative same-set veto once the prober becomes active.
+    active || (tl_out.b.valid &&
+      (tl_out.b.bits.address >> blockOffBits) === (address >> blockOffBits))
   }
   val atomic_replay_s3 = RegNext(atomic_replay_permission, false.B)
   val atomic_exclusive_s3 = RegNext(
