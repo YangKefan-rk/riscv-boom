@@ -944,12 +944,10 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     val active = prober.io.state.valid && sameSet &&
       !(replay && prober.io.before_permission_change) &&
       (prober.io.before_permission_change || sameBlock || sharedWay)
-    // A newly accepted probe cannot revoke an MSHR replay before metadata
-    // lookup. The MSHR retains permission through its replay and data write.
-    // Later probe states remain conflicts, including the S3 recheck.
-    val replayBeforeProbe = replay &&
-      (!prober.io.state.valid || prober.io.before_permission_change)
-    active || (tl_out.b.valid && !replayBeforeProbe &&
+    // A queued B request cannot revoke a replay before its data write: an
+    // accepted request first enters metadata lookup. Existing active probes
+    // remain conflicts according to their block, way, and stage above.
+    active || (tl_out.b.valid && !replay &&
       (tl_out.b.bits.address >> blockOffBits) === (address >> blockOffBits))
   }
   val atomic_replay_s3 = RegNext(atomic_replay_permission, false.B)
