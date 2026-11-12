@@ -949,7 +949,9 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     // Later probe states remain conflicts, including the S3 recheck.
     val replayBeforeProbe = replay &&
       (!prober.io.state.valid || prober.io.before_permission_change)
-    active || (tl_out.b.valid && !replayBeforeProbe &&
+    // A queued B cannot revoke this line while the ProbeUnit is busy.
+    // Keep accepted B probes conservative; active conflicts are handled above.
+    active || (tl_out.b.fire && !replayBeforeProbe &&
       (tl_out.b.bits.address >> blockOffBits) === (address >> blockOffBits))
   }
   val atomic_replay_s3 = RegNext(atomic_replay_permission, false.B)
