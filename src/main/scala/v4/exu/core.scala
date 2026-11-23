@@ -919,7 +919,7 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
     // Stable CSR poststate is sampled after retirement. Counters are sampled
     // immediately after the accepted write instead: they can advance while the
     // CSR uop is still waiting in the ROB, so retirement-time peeks miscompare.
-    val stableCsrAddresses = Seq(CSRs.fcsr, CSRs.stvec, CSRs.sscratch, CSRs.sepc,
+    val stableCsrAddresses = Seq(CSRs.fcsr, CSRs.sstatus, CSRs.satp, CSRs.stvec, CSRs.sscratch, CSRs.sepc,
       CSRs.scause, CSRs.stval, CSRs.mstatus, CSRs.medeleg, CSRs.mideleg,
       CSRs.mie, CSRs.mtvec, CSRs.mscratch, CSRs.mepc, CSRs.mcause, CSRs.mtval,
       CSRs.pmpcfg0, CSRs.pmpaddr0).filter(csr.read_mapping.contains)
@@ -1061,6 +1061,29 @@ class BoomCore(roccCSRs: Seq[Seq[CustomCSR]])(implicit p: Parameters) extends Bo
       post.bits.pc := RegNext(retirement.bits.pc)
       post.bits.fcsr := MuxLookup(CSRs.fcsr.U, 0.U(64.W))(csrReadbacks)
       post.bits.mstatus := MuxLookup(CSRs.mstatus.U, 0.U(64.W))(csrReadbacks)
+    }
+
+    def sfenceVma(instruction: UInt): Bool =
+      (instruction & "hfe007fff".U) === "h12000073".U
+    val systemState = Wire(new boom.v4.difftest.DifftestSystemState)
+    systemState.satp := requiredDispatchCsr(CSRs.satp)
+    systemState.privilege := csr.io.status.prv
+    systemState.mstatus := requiredDispatchCsr(CSRs.mstatus)
+    when (csr_resp.valid && sfenceVma(csr_resp.bits.uop.debug_inst)) {
+      assert(csr.io.rw.cmd === CSR.N || csr.io.rw.cmd === CSR.R,
+        "DiffTest SFENCE.VMA issued a CSR write")
+    }
+    for (w <- 0 until coreWidth) {
+      val retirement = io.difftest.get.retire(w)
+      val sample = io.difftest.get.sfence_state(w)
+      val owner = retirement.valid && retirement.bits.architectural &&
+        (sfenceVma(retirement.bits.instruction) || retirement.bits.instruction === "h30200073".U)
+      sample.valid := RegNext(owner, false.B)
+      sample.bits.identity := RegNext(retirement.bits.identity)
+      sample.bits.source_cycle := RegNext(io.difftest_control.get.cycle)
+      sample.bits.pc := RegNext(retirement.bits.pc)
+      sample.bits.before := RegEnable(systemState, owner)
+      sample.bits.after := systemState
     }
 
     val terminal = Module(new boom.v4.difftest.DifftestTerminalStop(coreWidth))

@@ -148,6 +148,20 @@ class DifftestFpPostObservation extends Bundle {
   val mstatus = UInt(64.W)
 }
 
+class DifftestSystemState extends Bundle {
+  val satp = UInt(64.W)
+  val privilege = UInt(2.W)
+  val mstatus = UInt(64.W)
+}
+
+class DifftestSfenceState extends Bundle {
+  val identity = new DifftestIdentity
+  val source_cycle = UInt(64.W)
+  val pc = UInt(64.W)
+  val before = new DifftestSystemState
+  val after = new DifftestSystemState
+}
+
 class DifftestCoreObservation(width: Int, entries: Int) extends Bundle
 {
   val hartid = UInt(64.W)
@@ -167,4 +181,5 @@ class DifftestCoreObservation(width: Int, entries: Int) extends Bundle
   // Counter environment sampled at execution, before register writeback.
   val counter_read = Valid(new DifftestCsrPostObservation)
   val fp_post = Vec(width, Valid(new DifftestFpPostObservation))
+  val sfence_state = Vec(width, Valid(new DifftestSfenceState))
 }
